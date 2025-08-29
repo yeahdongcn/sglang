@@ -1570,6 +1570,8 @@ def get_device(device_id: Optional[int] = None) -> str:
             return "npu"
         return "npu:{}".format(device_id)
 
+    print("arielg")
+    print(hasattr(torch, "musa"))
     if hasattr(torch, "musa") and torch.musa.is_available():
         if device_id is None:
             return "musa"

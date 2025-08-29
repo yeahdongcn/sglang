@@ -1,4 +1,4 @@
-curl http://localhost:30000/generate \
+curl http://localhost:96886/generate \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Once upon a time,",

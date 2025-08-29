@@ -151,34 +151,34 @@ async def lifespan(fast_api_app: FastAPI):
 
     server_args: ServerArgs = fast_api_app.server_args
 
-    tool_server = None
-    if server_args.tool_server == "demo":
-        from sglang.srt.entrypoints.openai.tool_server import DemoToolServer
+    # tool_server = None
+    # if server_args.tool_server == "demo":
+    #     from sglang.srt.entrypoints.openai.tool_server import DemoToolServer
 
-        tool_server = DemoToolServer()
-    elif server_args.tool_server:
-        from sglang.srt.entrypoints.openai.tool_server import MCPToolServer
+    #     tool_server = DemoToolServer()
+    # elif server_args.tool_server:
+    #     from sglang.srt.entrypoints.openai.tool_server import MCPToolServer
 
-        tool_server = MCPToolServer()
-        await tool_server.add_tool_server(server_args.tool_server)
+    #     tool_server = MCPToolServer()
+    #     await tool_server.add_tool_server(server_args.tool_server)
 
-    try:
-        from sglang.srt.entrypoints.openai.serving_responses import (
-            OpenAIServingResponses,
-        )
+    # try:
+    #     from sglang.srt.entrypoints.openai.serving_responses import (
+    #         OpenAIServingResponses,
+    #     )
 
-        fast_api_app.state.openai_serving_responses = OpenAIServingResponses(
-            _global_state.tokenizer_manager,
-            _global_state.template_manager,
-            enable_prompt_tokens_details=True,
-            enable_force_include_usage=True,
-            tool_server=tool_server,
-        )
-    except Exception as e:
-        import traceback
+    #     fast_api_app.state.openai_serving_responses = OpenAIServingResponses(
+    #         _global_state.tokenizer_manager,
+    #         _global_state.template_manager,
+    #         enable_prompt_tokens_details=True,
+    #         enable_force_include_usage=True,
+    #         tool_server=tool_server,
+    #     )
+    # except Exception as e:
+    #     import traceback
 
-        traceback.print_exc()
-        logger.warning(f"Can not initialize OpenAIServingResponses, error: {e}")
+    #     traceback.print_exc()
+    #     logger.warning(f"Can not initialize OpenAIServingResponses, error: {e}")
 
     if server_args.warmups is not None:
         await execute_warmups(

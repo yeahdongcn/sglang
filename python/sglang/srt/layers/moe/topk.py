@@ -49,6 +49,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_npu,
+    is_musa,
 )
 
 try:
@@ -64,6 +65,7 @@ _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_npu = is_npu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_is_musa = is_musa()
 
 if _is_cuda:
     from sgl_kernel import moe_fused_gate
@@ -77,6 +79,8 @@ if _use_aiter:
         raise ImportError("aiter is required when SGLANG_USE_AITER is set to True")
 if _is_npu:
     import torch_npu
+if _is_musa:
+    import torch_musa
 
 # -------------------------------- TopKConfig ---------------------------------------
 

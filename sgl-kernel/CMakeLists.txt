@@ -63,6 +63,7 @@ find_package(Torch REQUIRED)
 
 include(FetchContent)
 
+# YES
 # # cutlass
 # FetchContent_Declare(
 #     repo-cutlass
@@ -79,6 +80,7 @@ include(FetchContent)
 #     GIT_SHALLOW    OFF
 # )
 
+# NO
 # FetchContent_Declare(
 #     repo-deepgemm
 #     GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
@@ -87,6 +89,7 @@ include(FetchContent)
 # )
 # FetchContent_Populate(repo-deepgemm)
 
+# YES
 # # Triton
 # FetchContent_Declare(
 #     repo-triton
@@ -96,6 +99,7 @@ include(FetchContent)
 # )
 # FetchContent_Populate(repo-triton)
 
+# NO
 # # flashinfer
 # FetchContent_Declare(
 #     repo-flashinfer
@@ -105,6 +109,7 @@ include(FetchContent)
 # )
 # FetchContent_Populate(repo-flashinfer)
 
+# May YES
 # flash-attention
 FetchContent_Declare(
     repo-flash-attention
@@ -114,6 +119,7 @@ FetchContent_Declare(
 )
 FetchContent_Populate(repo-flash-attention)
 
+# NO
 # # mscclpp
 # FetchContent_Declare(
 #     repo-mscclpp

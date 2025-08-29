@@ -45,8 +45,9 @@ _is_npu = is_npu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_hip = is_hip()
+_is_musa = is_musa()
 
-if _is_cuda:
+if _is_cuda or _is_musa:
     from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
 elif _is_hip:
     from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
@@ -231,7 +232,7 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         return nn.Identity()
 
 
-if not (_is_cuda or _is_npu or (_is_cpu and _is_cpu_amx_available) or _is_hip or is_musa):
+if not (_is_cuda or _is_npu or (_is_cpu and _is_cpu_amx_available) or _is_hip or _is_musa):
     logger.info(
         "sgl-kernel is not available on Non-NV, Non-AMD platforms or Non-AMX CPUs. Fallback to other kernel libraries."
     )

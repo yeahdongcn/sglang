@@ -48,12 +48,12 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   m.def(
       "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
       "int rank, bool full_nvlink) -> int");
-  m.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
+  m.impl("init_custom_ar", torch::kMUSA, &init_custom_ar);
 
   m.def(
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
       "int reg_buffer_sz_bytes) -> ()");
-  m.impl("all_reduce", torch::kCUDA, &all_reduce);
+  m.impl("all_reduce", torch::kMUSA, &all_reduce);
 
   /*
    * From csrc/moe

@@ -749,7 +749,7 @@ class BenchmarkMetrics:
     concurrency: float
 
 
-SHAREGPT_URL = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+SHAREGPT_URL = "https://xget.xi-xu.me/hf/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 
 
 def download_and_cache_file(url: str, filename: Optional[str] = None):
@@ -1805,9 +1805,9 @@ def run_benchmark(args_: argparse.Namespace):
     # Set url
     if args.port is None:
         args.port = {
-            "sglang": 30000,
-            "sglang-native": 30000,
-            "sglang-oai": 30000,
+            "sglang": 43434,
+            "sglang-native": 43434,
+            "sglang-oai": 43434,
             "lmdeploy": 23333,
             "vllm": 8000,
             "trt": 8000,

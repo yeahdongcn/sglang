@@ -8,7 +8,7 @@ import torch
 
 from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
-from sglang.srt.utils import is_npu
+from sglang.srt.utils import is_npu, is_musa
 
 _is_npu = is_npu()
 if _is_npu:

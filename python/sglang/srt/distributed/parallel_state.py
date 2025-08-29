@@ -49,15 +49,23 @@ from sglang.srt.utils import (
     is_npu,
     is_shm_available,
     supports_custom_op,
+    is_musa,
 )
 
 _is_musa = is_musa()
 _is_npu = is_npu()
+_is_musa = is_musa()
 
 
 @dataclass
 class GraphCaptureContext:
-    stream: torch.cuda.Stream if not _is_npu else torch.npu.Stream
+    stream: (
+        torch.cuda.Stream
+        if not _is_npu and not _is_musa
+        else torch.npu.Stream
+        if _is_npu
+        else torch.musa.Stream
+    )
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
@@ -453,7 +461,7 @@ class GroupCoordinator:
                 maybe_pynccl_context = nullcontext()
             else:
                 maybe_pynccl_context = pynccl_comm.change_state(
-                    enable=True, stream=torch.cuda.current_stream()
+                    enable=True, stream=torch.musa.current_stream()
                 )
 
             pymscclpp_comm = self.pymscclpp_comm
@@ -512,7 +520,7 @@ class GroupCoordinator:
             and input_.symmetric_memory
         ):
             with self.pynccl_comm.change_state(
-                enable=True, stream=torch.cuda.current_stream()
+                enable=True, stream=torch.musa.current_stream()
             ):
                 self.pynccl_comm.all_reduce(input_)
                 return input_
@@ -599,7 +607,7 @@ class GroupCoordinator:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
 
-        with pynccl_comm.change_state(enable=True, stream=torch.cuda.current_stream()):
+        with pynccl_comm.change_state(enable=True, stream=torch.musa.current_stream()):
             assert (
                 pynccl_comm is not None and not pynccl_comm.disabled
             ), "pynccl is required for reduce_scatterv"
@@ -725,7 +733,7 @@ class GroupCoordinator:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
 
-        with pynccl_comm.change_state(enable=True, stream=torch.cuda.current_stream()):
+        with pynccl_comm.change_state(enable=True, stream=torch.musa.current_stream()):
             assert (
                 pynccl_comm is not None and not pynccl_comm.disabled
             ), "pynccl is required for all_gatherv"
@@ -865,13 +873,13 @@ class GroupCoordinator:
 
         # Serialize object to tensor and get the size as well
         object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).cuda(
-            device=torch.cuda.current_device()
+            device=torch.musa.current_device()
         )
 
         size_tensor = torch.tensor(
             [object_tensor.numel()],
             dtype=torch.long,
-            device=torch.cuda.current_device(),
+            device=torch.musa.current_device(),
         )
 
         # Send object size
@@ -897,7 +905,7 @@ class GroupCoordinator:
         ), "Invalid source rank. Source rank is the same as the current rank."
 
         size_tensor = torch.empty(
-            1, dtype=torch.long, device=torch.cuda.current_device()
+            1, dtype=torch.long, device=torch.musa.current_device()
         )
 
         # Receive object size
@@ -909,7 +917,7 @@ class GroupCoordinator:
         object_tensor = torch.empty(  # type: ignore[call-overload]
             size_tensor.item(),  # type: ignore[arg-type]
             dtype=torch.uint8,
-            device=torch.cuda.current_device(),
+            device=torch.musa.current_device(),
         )
 
         rank_object = torch.distributed.recv(
@@ -1640,6 +1648,14 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if not current_platform.is_cpu():
         if hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
+            if hasattr(torch._C, "_host_emptyCache"):
+                torch._C._host_emptyCache()
+            else:
+                logger.warning(
+                    "torch._C._host_emptyCache() only available in Pytorch >=2.5"
+                )
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            torch.musa.empty_cache()
             if hasattr(torch._C, "_host_emptyCache"):
                 torch._C._host_emptyCache()
             else:

@@ -16,6 +16,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_npu,
+    is_musa,
 )
 
 _is_cuda = is_cuda()
@@ -24,6 +25,7 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_npu = is_npu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
+_is_musa = is_musa()
 
 if _is_cuda:
     from sgl_kernel import apply_rope_with_cos_sin_cache_inplace
@@ -32,6 +34,9 @@ if _use_aiter:
 
 if is_npu():
     import torch_npu
+
+if is_musa():
+    import torch_musa
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -95,14 +100,16 @@ class RotaryEmbedding(CustomOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
+        print("yeahdongcn")
+        print(self.dtype)
 
         cache = self._compute_cos_sin_cache()
         # NOTE(ByronHsu): cache needs to be in FP32 for numerical stability
-        if not _is_cuda:
+        if not _is_cuda and not _is_musa:
             cache = cache.to(dtype)
 
         if (
-            not (_is_cuda or _is_npu) or self.head_size not in [64, 128, 256, 512]
+            not (_is_cuda or _is_npu or _is_musa) or self.head_size not in [64, 128, 256, 512]
         ) and not (_is_cpu and _is_cpu_amx_available):
             from vllm._custom_ops import rotary_embedding
 
@@ -671,8 +678,15 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
-        device: Optional[str] = "cuda" if not _is_npu else "npu",
+        device: Optional[str] = None,
     ) -> None:
+        if device is None:
+            if _is_npu:
+                device = "npu"
+            elif _is_musa:
+                device = "musa"
+            else:
+                device = "cuda"
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
         self.attn_factor = attn_factor
