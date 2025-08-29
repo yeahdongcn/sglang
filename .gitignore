@@ -238,3 +238,6 @@ compile_commands.json
 Cargo.lock
 
 lmms-eval
+
+
+sgl-kernel/csrc_musa/

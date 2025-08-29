@@ -35,6 +35,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_npu,
+    is_musa,
     set_weight_attrs,
 )
 from sglang.utils import resolve_obj_by_qualname
@@ -230,7 +231,7 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         return nn.Identity()
 
 
-if not (_is_cuda or _is_npu or (_is_cpu and _is_cpu_amx_available) or _is_hip):
+if not (_is_cuda or _is_npu or (_is_cpu and _is_cpu_amx_available) or _is_hip or is_musa):
     logger.info(
         "sgl-kernel is not available on Non-NV, Non-AMD platforms or Non-AMX CPUs. Fallback to other kernel libraries."
     )

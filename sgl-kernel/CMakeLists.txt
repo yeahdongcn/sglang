@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.26 FATAL_ERROR)
-project(sgl-kernel LANGUAGES CXX CUDA)
+project(sgl-kernel LANGUAGES CXX)
 
 # CMake
 cmake_policy(SET CMP0169 OLD)
@@ -17,71 +17,93 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 
 # CUDA
-enable_language(CUDA)
-find_package(CUDAToolkit REQUIRED)
-set_property(GLOBAL PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+# enable_language(CUDA)
+# find_package(CUDAToolkit REQUIRED)
+# set_property(GLOBAL PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-message(STATUS "Detected CUDA_VERSION=${CUDA_VERSION}")
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "13.0")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 13.0")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.8")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.4")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.1")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.1")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "11.8")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 11.8")
+# message(STATUS "Detected CUDA_VERSION=${CUDA_VERSION}")
+# if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "13.0")
+#     message("CUDA_VERSION ${CUDA_VERSION} >= 13.0")
+# elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8")
+#     message("CUDA_VERSION ${CUDA_VERSION} >= 12.8")
+# elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4")
+#     message("CUDA_VERSION ${CUDA_VERSION} >= 12.4")
+# elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.1")
+#     message("CUDA_VERSION ${CUDA_VERSION} >= 12.1")
+# elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "11.8")
+#     message("CUDA_VERSION ${CUDA_VERSION} >= 11.8")
+# endif()
+
+# MUSA
+if (NOT EXISTS $ENV{MUSA_PATH})
+    if (NOT EXISTS /opt/musa)
+        set(MUSA_PATH /usr/local/musa)
+    else()
+        set(MUSA_PATH /opt/musa)
+    endif()
+else()
+    set(MUSA_PATH $ENV{MUSA_PATH})
+endif()
+list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
+find_package(MUSAToolkit REQUIRED)
+if (MUSAToolkit_FOUND)
+    message(STATUS "MUSA Toolkit found")
+
+    set(CMAKE_C_COMPILER "${MUSA_PATH}/bin/clang")
+    set(CMAKE_C_EXTENSIONS OFF)
+    set(CMAKE_CXX_COMPILER "${MUSA_PATH}/bin/clang++")
+    set(CMAKE_CXX_EXTENSIONS OFF)
+
 endif()
 
 # Torch
 find_package(Torch REQUIRED)
 # clean Torch Flag
-clear_cuda_arches(CMAKE_FLAG)
+# clear_cuda_arches(CMAKE_FLAG)
 
 include(FetchContent)
 
-# cutlass
-FetchContent_Declare(
-    repo-cutlass
-    GIT_REPOSITORY https://github.com/NVIDIA/cutlass
-    GIT_TAG        a49a78ffefc86a87160dfe0ccc3a3a2d1622c918
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-cutlass)
+# # cutlass
+# FetchContent_Declare(
+#     repo-cutlass
+#     GIT_REPOSITORY https://github.com/NVIDIA/cutlass
+#     GIT_TAG        a49a78ffefc86a87160dfe0ccc3a3a2d1622c918
+#     GIT_SHALLOW    OFF
+# )
+# FetchContent_Populate(repo-cutlass)
 
-FetchContent_Declare(
-    repo-fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt
-    GIT_TAG        553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28
-    GIT_SHALLOW    OFF
-)
+# FetchContent_Declare(
+#     repo-fmt
+#     GIT_REPOSITORY https://github.com/fmtlib/fmt
+#     GIT_TAG        553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28
+#     GIT_SHALLOW    OFF
+# )
 
-FetchContent_Declare(
-    repo-deepgemm
-    GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
-    GIT_TAG        sgl
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-deepgemm)
+# FetchContent_Declare(
+#     repo-deepgemm
+#     GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
+#     GIT_TAG        sgl
+#     GIT_SHALLOW    OFF
+# )
+# FetchContent_Populate(repo-deepgemm)
 
-# Triton
-FetchContent_Declare(
-    repo-triton
-    GIT_REPOSITORY "https://github.com/triton-lang/triton"
-    GIT_TAG        8f9f695ea8fde23a0c7c88e4ab256634ca27789f
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-triton)
+# # Triton
+# FetchContent_Declare(
+#     repo-triton
+#     GIT_REPOSITORY "https://github.com/triton-lang/triton"
+#     GIT_TAG        8f9f695ea8fde23a0c7c88e4ab256634ca27789f
+#     GIT_SHALLOW    OFF
+# )
+# FetchContent_Populate(repo-triton)
 
-# flashinfer
-FetchContent_Declare(
-    repo-flashinfer
-    GIT_REPOSITORY https://github.com/flashinfer-ai/flashinfer.git
-    GIT_TAG        9220fb3443b5a5d274f00ca5552f798e225239b7
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-flashinfer)
+# # flashinfer
+# FetchContent_Declare(
+#     repo-flashinfer
+#     GIT_REPOSITORY https://github.com/flashinfer-ai/flashinfer.git
+#     GIT_TAG        9220fb3443b5a5d274f00ca5552f798e225239b7
+#     GIT_SHALLOW    OFF
+# )
+# FetchContent_Populate(repo-flashinfer)
 
 # flash-attention
 FetchContent_Declare(
@@ -92,14 +114,14 @@ FetchContent_Declare(
 )
 FetchContent_Populate(repo-flash-attention)
 
-# mscclpp
-FetchContent_Declare(
-    repo-mscclpp
-    GIT_REPOSITORY https://github.com/microsoft/mscclpp.git
-    GIT_TAG        51eca89d20f0cfb3764ccd764338d7b22cd486a6
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-mscclpp)
+# # mscclpp
+# FetchContent_Declare(
+#     repo-mscclpp
+#     GIT_REPOSITORY https://github.com/microsoft/mscclpp.git
+#     GIT_TAG        51eca89d20f0cfb3764ccd764338d7b22cd486a6
+#     GIT_SHALLOW    OFF
+# )
+# FetchContent_Populate(repo-mscclpp)
 
 # ccache option
 option(ENABLE_CCACHE "Whether to use ccache" ON)
@@ -110,8 +132,8 @@ if(CCACHE_FOUND AND ENABLE_CCACHE AND DEFINED ENV{CCACHE_DIR})
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
 endif()
 
-# Enable gencode below SM90
-option(ENABLE_BELOW_SM90 "Enable below SM90" ON)
+# # Enable gencode below SM90
+# option(ENABLE_BELOW_SM90 "Enable below SM90" ON)
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     set(ENABLE_BELOW_SM90 OFF)
@@ -119,13 +141,14 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
 endif()
 
 include_directories(
+    ${TORCH_INCLUDE_DIRS}
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/csrc
-    ${repo-cutlass_SOURCE_DIR}/include
-    ${repo-cutlass_SOURCE_DIR}/tools/util/include
-    ${repo-flashinfer_SOURCE_DIR}/include
-    ${repo-flashinfer_SOURCE_DIR}/csrc
-    ${repo-mscclpp_SOURCE_DIR}/include
+    # ${repo-cutlass_SOURCE_DIR}/include
+    # ${repo-cutlass_SOURCE_DIR}/tools/util/include
+    # ${repo-flashinfer_SOURCE_DIR}/include
+    # ${repo-flashinfer_SOURCE_DIR}/csrc
+    # ${repo-mscclpp_SOURCE_DIR}/include
 )
 
 set(SGL_KERNEL_CUDA_FLAGS
@@ -134,15 +157,15 @@ set(SGL_KERNEL_CUDA_FLAGS
     "-O3"
     "-Xcompiler"
     "-fPIC"
-    "-gencode=arch=compute_90,code=sm_90"
+    # "-gencode=arch=compute_90,code=sm_90"
     "-std=c++17"
-    "-DFLASHINFER_ENABLE_F16"
-    "-DCUTE_USE_PACKED_TUPLE=1"
-    "-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1"
-    "-DCUTLASS_VERSIONS_GENERATED"
-    "-DCUTLASS_TEST_LEVEL=0"
-    "-DCUTLASS_TEST_ENABLE_CACHED_RESULTS=1"
-    "-DCUTLASS_DEBUG_TRACE_LEVEL=0"
+    # "-DFLASHINFER_ENABLE_F16"
+    # "-DCUTE_USE_PACKED_TUPLE=1"
+    # "-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1"
+    # "-DCUTLASS_VERSIONS_GENERATED"
+    # "-DCUTLASS_TEST_LEVEL=0"
+    # "-DCUTLASS_TEST_ENABLE_CACHED_RESULTS=1"
+    # "-DCUTLASS_DEBUG_TRACE_LEVEL=0"
     "--expt-relaxed-constexpr"
     "--expt-extended-lambda"
     "--threads=32"
@@ -154,12 +177,14 @@ set(SGL_KERNEL_CUDA_FLAGS
     # uncomment to debug
     # "--ptxas-options=-v"
     # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
+    "-fsigned-char -x musa -mtgpu"
+    "--cuda-gpu-arch=mp_22"
 )
 
 option(SGL_KERNEL_ENABLE_SM100A           "Enable SM100A"           OFF)
 option(SGL_KERNEL_ENABLE_SM90A            "Enable SM90A"            OFF)
-option(SGL_KERNEL_ENABLE_BF16             "Enable BF16"             ON)
-option(SGL_KERNEL_ENABLE_FP8              "Enable FP8"              ON)
+option(SGL_KERNEL_ENABLE_BF16             "Enable BF16"             OFF)
+option(SGL_KERNEL_ENABLE_FP8              "Enable FP8"              OFF)
 option(SGL_KERNEL_ENABLE_FP4              "Enable FP4"              OFF)
 option(SGL_KERNEL_ENABLE_FA3              "Enable FA3"              OFF)
 
@@ -283,15 +308,15 @@ set(SOURCES
     "csrc/speculative/packbit.cu"
     "csrc/speculative/speculative_sampling.cu"
 
-    "${repo-flashinfer_SOURCE_DIR}/csrc/norm.cu"
-    "${repo-flashinfer_SOURCE_DIR}/csrc/renorm.cu"
-    "${repo-flashinfer_SOURCE_DIR}/csrc/sampling.cu"
+    # "${repo-flashinfer_SOURCE_DIR}/csrc/norm.cu"
+    # "${repo-flashinfer_SOURCE_DIR}/csrc/renorm.cu"
+    # "${repo-flashinfer_SOURCE_DIR}/csrc/sampling.cu"
 
-    "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_causal_sm80.cu"
-    "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_sm80.cu"
-    "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_fp16_causal_sm80.cu"
-    "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_fp16_sm80.cu"
-    "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/flash_sparse_api.cpp"
+    # "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_causal_sm80.cu"
+    # "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_sm80.cu"
+    # "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_fp16_causal_sm80.cu"
+    # "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_fp16_sm80.cu"
+    # "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/flash_sparse_api.cpp"
 )
 
 Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
@@ -319,15 +344,15 @@ else()
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 endif()
 
-# mscclpp
-set(MSCCLPP_USE_CUDA ON)
-set(MSCCLPP_BYPASS_GPU_CHECK ON)
-set(MSCCLPP_BUILD_TESTS OFF)
-add_subdirectory(
-    ${repo-mscclpp_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}/mscclpp-build
-)
-target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt mscclpp_static)
+# # mscclpp
+# set(MSCCLPP_USE_CUDA ON)
+# set(MSCCLPP_BYPASS_GPU_CHECK ON)
+# set(MSCCLPP_BUILD_TESTS OFF)
+# add_subdirectory(
+#     ${repo-mscclpp_SOURCE_DIR}
+#     ${CMAKE_CURRENT_BINARY_DIR}/mscclpp-build
+# )
+# target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt mscclpp_static)
 
 # flash attention
 target_compile_definitions(common_ops PRIVATE
@@ -409,7 +434,7 @@ if (SGL_KERNEL_ENABLE_FA3)
     target_include_directories(flash_ops PRIVATE
         ${repo-flash-attention_SOURCE_DIR}/hopper
     )
-    target_link_libraries(flash_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
+    target_link_libraries(flash_ops PRIVATE ${TORCH_LIBRARIES} c10 musa)
 
     install(TARGETS flash_ops LIBRARY DESTINATION "sgl_kernel")
     set(FLASH_OPS_COMPILE_DEFS
@@ -433,57 +458,57 @@ set(SPATIAL_SOURCES
 
 Python_add_library(spatial_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SPATIAL_SOURCES})
 target_compile_options(spatial_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>)
-target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
+target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 musa)
 install(TARGETS spatial_ops LIBRARY DESTINATION sgl_kernel)
 
 
-# ============================ DeepGEMM (JIT) ============================= #
-# Create a separate library for DeepGEMM's Python API.
-# This keeps its compilation isolated from the main common_ops.
-set(DEEPGEMM_SOURCES
-    "${repo-deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
-)
+# # ============================ DeepGEMM (JIT) ============================= #
+# # Create a separate library for DeepGEMM's Python API.
+# # This keeps its compilation isolated from the main common_ops.
+# set(DEEPGEMM_SOURCES
+#     "${repo-deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
+# )
 
-Python_add_library(deep_gemm_cpp MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${DEEPGEMM_SOURCES})
+# Python_add_library(deep_gemm_cpp MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${DEEPGEMM_SOURCES})
 
-# Link against necessary libraries, including nvrtc for JIT compilation.
-target_link_libraries(deep_gemm_cpp PRIVATE ${TORCH_LIBRARIES} c10 cuda nvrtc mscclpp_static)
+# # Link against necessary libraries, including nvrtc for JIT compilation.
+# target_link_libraries(deep_gemm_cpp PRIVATE ${TORCH_LIBRARIES} c10 cuda nvrtc mscclpp_static)
 
-# Add include directories needed by DeepGEMM.
-target_include_directories(deep_gemm_cpp PRIVATE
-    ${repo-deepgemm_SOURCE_DIR}/deep_gemm/include
-    ${repo-cutlass_SOURCE_DIR}/include
-    ${repo-fmt_SOURCE_DIR}/include
-)
+# # Add include directories needed by DeepGEMM.
+# target_include_directories(deep_gemm_cpp PRIVATE
+#     ${repo-deepgemm_SOURCE_DIR}/deep_gemm/include
+#     ${repo-cutlass_SOURCE_DIR}/include
+#     ${repo-fmt_SOURCE_DIR}/include
+# )
 
-# Apply the same compile options as common_ops.
-target_compile_options(deep_gemm_cpp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>)
+# # Apply the same compile options as common_ops.
+# target_compile_options(deep_gemm_cpp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>)
 
-# Create an empty __init__.py to make `deepgemm` a Python package.
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py "")
-install(
-    FILES ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py
-    DESTINATION deep_gemm
-    RENAME __init__.py
-)
+# # Create an empty __init__.py to make `deepgemm` a Python package.
+# file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py "")
+# install(
+#     FILES ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py
+#     DESTINATION deep_gemm
+#     RENAME __init__.py
+# )
 
-# Install the compiled DeepGEMM API library.
-install(TARGETS deep_gemm_cpp LIBRARY DESTINATION deep_gemm)
+# # Install the compiled DeepGEMM API library.
+# install(TARGETS deep_gemm_cpp LIBRARY DESTINATION deep_gemm)
 
-# Install the source files required by DeepGEMM for runtime JIT compilation.
-install(
-    DIRECTORY ${repo-deepgemm_SOURCE_DIR}/deep_gemm/
-    DESTINATION deep_gemm
-)
+# # Install the source files required by DeepGEMM for runtime JIT compilation.
+# install(
+#     DIRECTORY ${repo-deepgemm_SOURCE_DIR}/deep_gemm/
+#     DESTINATION deep_gemm
+# )
 
-install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cute/"
-        DESTINATION "deep_gemm/include/cute")
+# install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cute/"
+#         DESTINATION "deep_gemm/include/cute")
 
-install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cutlass/"
-        DESTINATION "deep_gemm/include/cutlass")
+# install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cutlass/"
+#         DESTINATION "deep_gemm/include/cutlass")
 
-# triton_kernels
-install(DIRECTORY "${repo-triton_SOURCE_DIR}/python/triton_kernels/triton_kernels/"
-        DESTINATION "triton_kernels"
-        PATTERN ".git*" EXCLUDE
-        PATTERN "__pycache__" EXCLUDE)
+# # triton_kernels
+# install(DIRECTORY "${repo-triton_SOURCE_DIR}/python/triton_kernels/triton_kernels/"
+#         DESTINATION "triton_kernels"
+#         PATTERN ".git*" EXCLUDE
+#         PATTERN "__pycache__" EXCLUDE)
