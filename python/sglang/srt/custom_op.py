@@ -69,6 +69,7 @@ class CustomOp(nn.Module):
         raise NotImplementedError
 
     def forward_musa(self, *args, **kwargs):
+        print("yeahdongcn: forward_musa")
         return self.forward_cuda(*args, **kwargs)
 
     def forward_hip(self, *args, **kwargs):
@@ -92,7 +93,7 @@ class CustomOp(nn.Module):
             return self.forward_cpu
         elif _is_npu:
             return self.forward_npu
-        # elif _is_musa:
-        #     return self.forward_musa
+        elif _is_musa:
+            return self.forward_musa
         else:
             return self.forward_native

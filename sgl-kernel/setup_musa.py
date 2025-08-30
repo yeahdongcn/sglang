@@ -41,21 +41,23 @@ include_dirs = [
     root / "csrc",
 ]
 
-SimplePorting(cuda_dir_path="csrc", mapping_rule={
-    # Common rules
-    "at::cuda": "at::musa",
-    "c10::cuda": "c10::musa",
-    "#include <ATen/cuda/CUDAContext.h>": "#include \"torch_musa/csrc/aten/musa/MUSAContext.h\"",
-    "#include <c10/cuda/CUDAGuard.h>": "#include \"torch_musa/csrc/core/MUSAGuard.h\"",
-    "#include <ATen/cuda/Exceptions.h>": "#include \"torch_musa/csrc/aten/musa/Exceptions.h\"",
-    "#include <c10/cuda/CUDAStream.h>": "#include \"torch_musa/csrc/core/MUSAStream.h\"",
-    "#include \"custom_all_reduce.cuh\"": "#include \"custom_all_reduce.muh\"",
-    "#include <THC/THCAtomics.cuh>": "#include <THC/THCAtomics.muh>",
-    }).run()
+SimplePorting(
+    cuda_dir_path="csrc",
+    mapping_rule={
+        "#include <ATen/cuda/CUDAContext.h>": "#include \"torch_musa/csrc/aten/musa/MUSAContext.h\"",
+        "#include <ATen/cuda/Exceptions.h>": "#include \"torch_musa/csrc/aten/musa/Exceptions.h\"",
+        "#include <THC/THCAtomics.cuh>": "#include <THC/THCAtomics.muh>",
+        "#include <c10/cuda/CUDAGuard.h>": "#include \"torch_musa/csrc/core/MUSAGuard.h\"",
+        "#include <c10/cuda/CUDAStream.h>": "#include \"torch_musa/csrc/core/MUSAStream.h\"",
+        "#include \"custom_all_reduce.cuh\"": "#include \"custom_all_reduce.muh\"",
+        "at::cuda": "at::musa",
+        "c10::cuda": "c10::musa",
+    }
+).run()
 
 sources = [
     "csrc_musa/allreduce/custom_all_reduce.mu",
-    "csrc_musa/allreduce/quick_all_reduce.mu",
+    # "csrc_musa/allreduce/quick_all_reduce.mu",
     "csrc_musa/common_extension_musa.cc",
     # "csrc_musa/elementwise/activation.mu",
     "csrc_musa/grammar/apply_token_bitmask_inplace_cuda.mu",

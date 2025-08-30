@@ -1526,6 +1526,9 @@ def print_info_once(msg: str) -> None:
 
 
 def get_device_name(device_id: int = 0) -> str:
+    if hasattr(torch, "musa") and torch.musa.is_available():
+        return torch.musa.get_device_name(device_id)
+
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         return torch.cuda.get_device_name(device_id)
 
@@ -1555,6 +1558,11 @@ def get_device(device_id: Optional[int] = None) -> str:
             )
         return "cpu"
 
+    if hasattr(torch, "musa") and torch.musa.is_available():
+        if device_id is None:
+            return "musa"
+        return "musa:{}".format(device_id)
+
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         if device_id is None:
             return "cuda"
@@ -1569,13 +1577,6 @@ def get_device(device_id: Optional[int] = None) -> str:
         if device_id == None:
             return "npu"
         return "npu:{}".format(device_id)
-
-    print("arielg")
-    print(hasattr(torch, "musa"))
-    if hasattr(torch, "musa") and torch.musa.is_available():
-        if device_id is None:
-            return "musa"
-        return "musa:{}".format(device_id)
 
     if is_habana_available():
         try:
@@ -1595,6 +1596,12 @@ def get_device(device_id: Optional[int] = None) -> str:
 
 @lru_cache(maxsize=1)
 def get_device_count() -> int:
+    if hasattr(torch, "musa") and torch.musa.is_available():
+        try:
+            return torch.musa.device_count()
+        except RuntimeError:
+            return 0
+
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         try:
             return torch.cuda.device_count()
@@ -1620,6 +1627,9 @@ def get_device_count() -> int:
 
 
 def get_device_core_count(device_id: int = 0) -> int:
+    if hasattr(torch, "musa") and torch.musa.is_available():
+        return torch.musa.get_device_properties(device_id).multi_processor_count
+
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
@@ -1628,6 +1638,9 @@ def get_device_core_count(device_id: int = 0) -> int:
 
 def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
     major, minor = None, None
+    if hasattr(torch, "musa") and torch.musa.is_available():
+        major, minor = torch.musa.get_device_capability(device_id)
+
     if hasattr(torch, "cuda") and torch.cuda.is_available():
         major, minor = torch.cuda.get_device_capability(device_id)
 
@@ -1691,7 +1704,8 @@ sglang_lib = Library("sglang", "FRAGMENT")  # noqa
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
-    return hasattr(torch.library, "custom_op")
+    return False
+    # return hasattr(torch.library, "custom_op")
 
 
 def direct_register_custom_op(
