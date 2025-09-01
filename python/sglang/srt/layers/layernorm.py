@@ -53,7 +53,8 @@ if _use_aiter:
 elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 elif is_musa:
-    raise ImportError("yeahdongcn")
+    # from vllm_musa._musa_custom_ops import fused_add_rms_norm, rms_norm
+    raise ImportError("yeahdongcn: vllm")
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,21 @@ class RMSNorm(CustomOp):
         return rms_norm(x, self.weight.data, self.variance_epsilon)
 
     def forward_hip(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if not x.is_contiguous():
+            # NOTE: Remove this if aiter kernel supports discontinuous input
+            x = x.contiguous()
+        if residual is not None:
+            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
+            return x, residual
+        out = torch.empty_like(x)
+        rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        return out
+
+    def forward_musa(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,

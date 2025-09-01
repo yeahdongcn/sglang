@@ -59,13 +59,7 @@ _is_musa = is_musa()
 
 @dataclass
 class GraphCaptureContext:
-    stream: (
-        torch.cuda.Stream
-        if not _is_npu and not _is_musa
-        else torch.npu.Stream
-        if _is_npu
-        else torch.musa.Stream
-    )
+    stream: torch.musa.Stream if not _is_npu else torch.npu.Stream
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
@@ -269,6 +263,8 @@ class GroupCoordinator:
         else:
             self.device = torch.device("cpu")
         self.device_module = torch.get_device_module(self.device)
+        print("yeahdongcn GroupCoordinator")
+        print(self.device_module)
 
         self.use_pynccl = use_pynccl
         self.use_pymscclpp = use_pymscclpp
@@ -461,7 +457,7 @@ class GroupCoordinator:
                 maybe_pynccl_context = nullcontext()
             else:
                 maybe_pynccl_context = pynccl_comm.change_state(
-                    enable=True, stream=torch.musa.current_stream()
+                    enable=True, stream=self.device_module.current_stream()
                 )
 
             pymscclpp_comm = self.pymscclpp_comm
@@ -520,7 +516,7 @@ class GroupCoordinator:
             and input_.symmetric_memory
         ):
             with self.pynccl_comm.change_state(
-                enable=True, stream=torch.musa.current_stream()
+                enable=True, stream=self.device_module.current_stream()
             ):
                 self.pynccl_comm.all_reduce(input_)
                 return input_
@@ -607,7 +603,7 @@ class GroupCoordinator:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
 
-        with pynccl_comm.change_state(enable=True, stream=torch.musa.current_stream()):
+        with pynccl_comm.change_state(enable=True, stream=self.device_module.current_stream()):
             assert (
                 pynccl_comm is not None and not pynccl_comm.disabled
             ), "pynccl is required for reduce_scatterv"
@@ -733,7 +729,7 @@ class GroupCoordinator:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
 
-        with pynccl_comm.change_state(enable=True, stream=torch.musa.current_stream()):
+        with pynccl_comm.change_state(enable=True, stream=self.device_module.current_stream()):
             assert (
                 pynccl_comm is not None and not pynccl_comm.disabled
             ), "pynccl is required for all_gatherv"
@@ -873,13 +869,13 @@ class GroupCoordinator:
 
         # Serialize object to tensor and get the size as well
         object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).cuda(
-            device=torch.musa.current_device()
+            device=self.device_module.current_device()
         )
 
         size_tensor = torch.tensor(
             [object_tensor.numel()],
             dtype=torch.long,
-            device=torch.musa.current_device(),
+            device=self.device_module.current_device(),
         )
 
         # Send object size
@@ -905,7 +901,7 @@ class GroupCoordinator:
         ), "Invalid source rank. Source rank is the same as the current rank."
 
         size_tensor = torch.empty(
-            1, dtype=torch.long, device=torch.musa.current_device()
+            1, dtype=torch.long, device=self.device_module.current_device()
         )
 
         # Receive object size
@@ -917,7 +913,7 @@ class GroupCoordinator:
         object_tensor = torch.empty(  # type: ignore[call-overload]
             size_tensor.item(),  # type: ignore[arg-type]
             dtype=torch.uint8,
-            device=torch.musa.current_device(),
+            device=self.device_module.current_device(),
         )
 
         rank_object = torch.distributed.recv(

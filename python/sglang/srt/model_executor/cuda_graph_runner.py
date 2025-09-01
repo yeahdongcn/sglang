@@ -510,12 +510,17 @@ class CudaGraphRunner:
             logger.info(log_message)
 
     def _capture_graph(self, graph, pool, stream, run_once_fn):
+        print("arielg: _capture_graph")
+        print(graph)
+        print(pool)
+        print(stream)
         with self.device_module.graph(graph, pool=pool, stream=stream):
             out = run_once_fn()
         return out
 
     def _create_device_graph(self):
-        return torch.cuda.CUDAGraph()
+        # return torch.cuda.CUDAGraph()
+        return torch.musa.MUSAGraph()
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = self._create_device_graph()

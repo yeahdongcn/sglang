@@ -351,6 +351,10 @@ class ModelRunner:
         elif self.device == "npu":
             self.init_attention_backend()
             self.init_device_graphs()
+        elif self.device == "musa":
+            self.init_mublas()
+            self.init_attention_backend()
+            self.init_device_graphs()
         else:
             self.graph_runner = None
             self.cuda_graph_mem_usage = 0
@@ -1417,6 +1421,15 @@ class ModelRunner:
         """We need to run a small matmul to init cublas. Otherwise, it will raise some errors later."""
         dtype = torch.float16
         device = "cuda"
+        a = torch.ones((16, 16), dtype=dtype, device=device)
+        b = torch.ones((16, 16), dtype=dtype, device=device)
+        c = a @ b
+        return c
+
+    def init_mublas(self):
+        """We need to run a small matmul to init mublas. Otherwise, it will raise some errors later."""
+        dtype = torch.float16
+        device = "musa"
         a = torch.ones((16, 16), dtype=dtype, device=device)
         b = torch.ones((16, 16), dtype=dtype, device=device)
         c = a @ b
