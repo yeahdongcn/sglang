@@ -69,7 +69,6 @@ class CustomOp(nn.Module):
         raise NotImplementedError
 
     def forward_musa(self, *args, **kwargs):
-        print("yeahdongcn: forward_musa")
         return self.forward_cuda(*args, **kwargs)
 
     def forward_hip(self, *args, **kwargs):

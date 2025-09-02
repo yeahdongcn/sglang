@@ -53,8 +53,7 @@ if _use_aiter:
 elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 elif is_musa:
-    # from vllm_musa._musa_custom_ops import fused_add_rms_norm, rms_norm
-    raise ImportError("yeahdongcn: vllm")
+    from vllm_musa._musa_custom_ops import fused_add_rms_norm, rms_norm
 
 logger = logging.getLogger(__name__)
 

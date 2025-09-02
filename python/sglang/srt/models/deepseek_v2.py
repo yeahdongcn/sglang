@@ -118,6 +118,7 @@ from sglang.srt.utils import (
     log_info_on_rank0,
     make_layers,
     use_intel_amx_backend,
+    is_musa,
 )
 
 _is_hip = is_hip()
@@ -127,6 +128,7 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _device_sm = get_device_sm()
+_is_musa = is_musa()
 
 if _is_cuda:
     from sgl_kernel import (
@@ -1368,12 +1370,13 @@ class DeepseekV2AttentionMLA(nn.Module):
                 dtype=attn_output.dtype,
                 device=attn_output.device,
             )
+            # XXX: Revisit this.
             torch.bmm(
-                attn_output.transpose(0, 1),
-                self.w_vc,
+                attn_output.transpose(0, 1).contiguous(),
+                self.w_vc.contiguous(),
                 out=attn_bmm_output.view(
                     -1, self.num_local_heads, self.v_head_dim
-                ).transpose(0, 1),
+                ).transpose(0, 1).contiguous(),
             )
         output, _ = self.o_proj(attn_bmm_output)
 

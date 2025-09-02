@@ -17,9 +17,16 @@ import functools
 from typing import Dict, Tuple
 
 import torch
+from sglang.srt.utils import (
+    is_musa,
+)
+
+_is_musa = is_musa()
 
 
 def get_cuda_stream() -> int:
+    if _is_musa:
+        return torch.musa.current_stream().musa_stream
     return torch.cuda.current_stream().cuda_stream
 
 
@@ -44,6 +51,9 @@ def _to_tensor_scalar_tuple(x):
 
 @functools.lru_cache(maxsize=1)
 def is_arch_support_pdl() -> bool:
+    if _is_musa:
+        # XXX: Revisit this.
+        return False
     # Hopper arch's compute capability == 9.0
     device = torch.cuda.current_device()
     major, minor = torch.cuda.get_device_capability(device)

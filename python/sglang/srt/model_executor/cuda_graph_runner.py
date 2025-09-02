@@ -510,10 +510,6 @@ class CudaGraphRunner:
             logger.info(log_message)
 
     def _capture_graph(self, graph, pool, stream, run_once_fn):
-        print("arielg: _capture_graph")
-        print(graph)
-        print(pool)
-        print(stream)
         with self.device_module.graph(graph, pool=pool, stream=stream):
             out = run_once_fn()
         return out

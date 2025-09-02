@@ -374,8 +374,6 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: Dict[str, Any] = {}
             exported_functions = NCCLLibrary.exported_functions
-            print("yeahdongcn: NCCL")
-            print(exported_functions)
             if hasattr(self.lib, "ncclCommWindowRegister"):
                 exported_functions.extend(NCCLLibrary.exported_functions_symm_mem)
             for func in exported_functions:

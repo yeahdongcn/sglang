@@ -263,8 +263,6 @@ class GroupCoordinator:
         else:
             self.device = torch.device("cpu")
         self.device_module = torch.get_device_module(self.device)
-        print("yeahdongcn GroupCoordinator")
-        print(self.device_module)
 
         self.use_pynccl = use_pynccl
         self.use_pymscclpp = use_pymscclpp
@@ -868,7 +866,7 @@ class GroupCoordinator:
         )
 
         # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).cuda(
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).musa(
             device=self.device_module.current_device()
         )
 

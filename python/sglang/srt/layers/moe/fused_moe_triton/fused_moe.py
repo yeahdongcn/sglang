@@ -36,6 +36,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     next_power_of_2,
+    is_musa
 )
 
 _is_hip = is_hip()
@@ -43,6 +44,7 @@ _is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_is_musa = is_musa()
 
 if _is_cuda:
     from sgl_kernel import gelu_and_mul, silu_and_mul
@@ -58,9 +60,11 @@ elif _is_hip:
             raise ImportError("aiter is required when SGLANG_USE_AITER is set to True")
     else:
         from vllm import _custom_ops as vllm_ops
+elif _is_musa:
+    from vllm_musa import _musa_custom_ops as vllm_ops
 
 
-if _is_cuda or _is_hip:
+if _is_cuda or _is_hip or _is_musa:
     from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
 
 

@@ -70,8 +70,6 @@ class PyNcclCommunicator:
             self.available = False
             self.disabled = True
             self.stream = None
-            print("yeahdongcn: exception")
-            XXXX
             return
 
         self.available = True
@@ -100,10 +98,8 @@ class PyNcclCommunicator:
             self.unique_id = group.broadcast_obj(self.unique_id, src=0)
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
-            print("yeahdongcn: device is cuda")
         elif isinstance(device, str):
             device = torch.device(device)
-            print("yeahodngcn: device is str")
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device

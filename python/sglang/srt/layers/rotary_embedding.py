@@ -103,13 +103,16 @@ class RotaryEmbedding(CustomOp):
 
         cache = self._compute_cos_sin_cache()
         # NOTE(ByronHsu): cache needs to be in FP32 for numerical stability
-        if not _is_cuda and not _is_musa:
+        if not (_is_cuda):
             cache = cache.to(dtype)
 
         if (
-            not (_is_cuda or _is_npu or _is_musa) or self.head_size not in [64, 128, 256, 512]
+            not (_is_cuda or _is_npu) or self.head_size not in [64, 128, 256, 512]
         ) and not (_is_cpu and _is_cpu_amx_available):
-            from vllm._custom_ops import rotary_embedding
+            if _is_musa:
+                from vllm_musa._musa_custom_ops import rotary_embedding
+            else:
+                from vllm._custom_ops import rotary_embedding
 
             self.vllm_rotary_embedding = rotary_embedding
 
