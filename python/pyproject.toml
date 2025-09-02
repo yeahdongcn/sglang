@@ -54,6 +54,7 @@ runtime_common = [
     "uvicorn",
     "uvloop",
     "xgrammar==0.1.23",
+    "bidict",
 ]
 
 srt = [

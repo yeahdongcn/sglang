@@ -18,13 +18,12 @@ import torch.multiprocessing as mp
 from typing_extensions import ParamSpec
 
 from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-from sglang.srt.utils import is_cuda, is_hip, is_musa
+from sglang.srt.utils import is_cuda, is_hip
 
 logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
-_is_musa = is_musa()
 
 if _is_cuda:
     try:

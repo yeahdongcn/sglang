@@ -18,13 +18,13 @@ from sglang.srt.distributed.device_communicators.custom_all_reduce_utils import 
     is_weak_contiguous,
 )
 from sglang.srt.distributed.parallel_state import in_the_same_node_as
-from sglang.srt.utils import is_cuda, is_hip
+from sglang.srt.utils import is_cuda, is_hip, is_musa
 
 logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
-
+_is_musa = is_musa()
 
 try:
     if ops.use_vllm_custom_allreduce and not _is_hip:
@@ -118,7 +118,10 @@ class CustomAllreduce:
             return
 
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            if _is_musa:
+                device = torch.device(f"musa:{device}")
+            else:
+                device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
         # now `device` is a `torch.device` object
@@ -144,6 +147,9 @@ class CustomAllreduce:
         # this checks hardware and driver support for NVLink
         if _is_cuda or _is_hip:
             full_nvlink = is_full_nvlink(physical_device_ids, world_size)
+        elif _is_musa:
+            # XXX: Revisit this.
+            full_nvlink = True
 
         if world_size > 2 and not full_nvlink:
             logger.warning(

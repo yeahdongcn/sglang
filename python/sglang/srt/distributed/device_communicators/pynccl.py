@@ -19,8 +19,11 @@ from sglang.srt.distributed.device_communicators.pynccl_wrapper import (
     ncclUniqueId,
 )
 from sglang.srt.distributed.utils import StatelessProcessGroup
+from sglang.srt.utils import is_musa
 
 logger = logging.getLogger(__name__)
+
+_is_musa = is_musa()
 
 
 class PyNcclCommunicator:
@@ -97,7 +100,10 @@ class PyNcclCommunicator:
         else:
             self.unique_id = group.broadcast_obj(self.unique_id, src=0)
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            if _is_musa:
+                device = torch.device(f"musa:{device}")
+            else:
+                device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
         # now `device` is a `torch.device` object
