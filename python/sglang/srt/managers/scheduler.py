@@ -2232,7 +2232,7 @@ class Scheduler(
             self.spec_num_total_forward_ct = 0
             self.cum_spec_accept_length = 0
             self.cum_spec_accept_count = 0
-            torch.musa.empty_cache()
+            torch.cuda.empty_cache()
             logger.info("Cache flushed successfully!")
             if_success = True
         else:
@@ -2548,7 +2548,7 @@ class IdleSleeper:
             > global_config.torch_empty_cache_interval
         ):
             self.last_empty_time = time.time()
-            torch.musa.empty_cache()
+            torch.cuda.empty_cache()
 
 
 def is_health_check_generate_req(recv_req):

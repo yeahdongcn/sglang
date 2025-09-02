@@ -515,8 +515,7 @@ class CudaGraphRunner:
         return out
 
     def _create_device_graph(self):
-        # return torch.cuda.CUDAGraph()
-        return torch.musa.MUSAGraph()
+        return torch.cuda.CUDAGraph()
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = self._create_device_graph()

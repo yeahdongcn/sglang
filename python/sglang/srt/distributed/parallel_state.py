@@ -59,7 +59,7 @@ _is_musa = is_musa()
 
 @dataclass
 class GraphCaptureContext:
-    stream: torch.musa.Stream if not _is_npu else torch.npu.Stream
+    stream: torch.cuda.Stream if not _is_npu else torch.npu.Stream
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
@@ -1640,14 +1640,6 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         ray.shutdown()
     gc.collect()
     if not current_platform.is_cpu():
-        if hasattr(torch, "musa") and torch.musa.is_available():
-            torch.musa.empty_cache()
-            if hasattr(torch._C, "_host_emptyCache"):
-                torch._C._host_emptyCache()
-            else:
-                logger.warning(
-                    "torch._C._host_emptyCache() only available in Pytorch >=2.5"
-                )
         if hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
             if hasattr(torch._C, "_host_emptyCache"):

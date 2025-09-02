@@ -325,7 +325,7 @@ class PyNcclCommunicator:
 
     @contextmanager
     def change_state(
-        self, enable: Optional[bool] = None, stream: Optional[torch.cuda.Stream|torch.musa.Stream] = None
+        self, enable: Optional[bool] = None, stream: Optional[torch.cuda.Stream] = None
     ):
         """
         A context manager to change the state of the communicator.
