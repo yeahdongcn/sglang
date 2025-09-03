@@ -19,7 +19,6 @@ from typing_extensions import ParamSpec
 
 from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from sglang.srt.utils import is_cuda, is_hip, is_musa
-import sglang.srt.distributed.device_communicators.mtml_wrapper as mtml_wrapper
 
 
 logger = logging.getLogger(__name__)
@@ -36,13 +35,9 @@ if _is_cuda:
 
 if _is_musa:
     try:
-        from sglang.srt.distributed.device_communicators.mtml_wrapper import (
-            MTMLLibrary,
-        )
-
-        pynvml = MTMLLibrary()
+        from sglang.srt.distributed.device_communicators.mtml_wrapper import pymtml as pynvml
     except ImportError as e:
-        logger.warning("Failed to import mtml_wrapper with %r", e)
+        logger.warning("Failed to import pymtml with %r", e)
 
 if _is_hip:
     try:

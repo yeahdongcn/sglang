@@ -70,7 +70,7 @@ _is_musa = is_musa()
 if _is_cuda:
     from sgl_kernel import moe_fused_gate
 
-if _is_cuda or _is_hip:
+if _is_cuda or _is_hip or _is_musa:
     from sgl_kernel import topk_softmax
 if _use_aiter:
     try:
@@ -79,8 +79,6 @@ if _use_aiter:
         raise ImportError("aiter is required when SGLANG_USE_AITER is set to True")
 if _is_npu:
     import torch_npu
-if _is_musa:
-    import torch_musa
 
 # -------------------------------- TopKConfig ---------------------------------------
 

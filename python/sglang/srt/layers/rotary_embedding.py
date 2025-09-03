@@ -35,9 +35,6 @@ if _use_aiter:
 if is_npu():
     import torch_npu
 
-if is_musa():
-    import torch_musa
-
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]

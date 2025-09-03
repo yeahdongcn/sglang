@@ -798,6 +798,7 @@ class FusedMoE(torch.nn.Module):
         if self.moe_ep_size > 1 and not self.enable_flashinfer_cutlass_moe:
             if self.expert_map_cpu is not None and self.expert_map_gpu is None:
                 # If we are in EP mode, we need to move the expert map to GPU.
+                print("yeahdongcn: 1")
                 self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
 
         if self.expert_map_gpu is not None:

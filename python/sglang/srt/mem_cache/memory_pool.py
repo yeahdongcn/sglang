@@ -46,8 +46,6 @@ _is_npu = is_npu()
 _is_musa = is_musa()
 if _is_npu:
     import torch_npu
-if _is_musa:
-    import torch_musa
 
 
 class ReqToTokenPool:
@@ -246,12 +244,12 @@ class MHATokenToKVPool(KVCache):
 
         self.k_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.k_buffer],
-            dtype=torch.float32,
+            dtype=torch.int64,
             device=self.device,
         )
         self.v_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.v_buffer],
-            dtype=torch.float32,
+            dtype=torch.int64,
             device=self.device,
         )
         self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
@@ -769,7 +767,7 @@ class MLATokenToKVPool(KVCache):
 
         self.data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.kv_buffer],
-            dtype=torch.float32,
+            dtype=torch.int64,
             device=self.device,
         )
         self.layer_transfer_counter = None

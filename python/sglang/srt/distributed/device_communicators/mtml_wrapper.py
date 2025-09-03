@@ -10,10 +10,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from sglang.srt.utils import is_musa
-
-_is_musa = is_musa()
-
 logger = logging.getLogger(__name__)
 
 # === export types and functions from mtml to Python ===
@@ -265,3 +261,5 @@ class MTMLLibrary:
             logger.exception(f"Unexpected error in mtmlMtlinkStatus: {e}")
 
         return status.value
+
+pymtml = MTMLLibrary()
