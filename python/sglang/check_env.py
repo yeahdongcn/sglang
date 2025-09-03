@@ -11,7 +11,11 @@ import torch
 
 from sglang.srt.utils import is_hip, is_musa
 
-MUSA_HOME = "/usr/local/musa"
+try:
+    from torch_musa.utils.simple_porting import SimplePorting
+    from torch_musa.utils.musa_extension import MUSA_HOME
+except ImportError:
+    MUSA_HOME = None
 
 
 def is_cuda_v2():
