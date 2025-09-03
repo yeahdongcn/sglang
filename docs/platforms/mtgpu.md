@@ -41,6 +41,7 @@ python3 -m sglang.launch_server --model-path /home/dist/Qwen3-30B-A3B-Instruct-2
 # Profile
 
 ```bash
+export SGLANG_TORCH_PROFILER_DIR=/ws/xx
 curl http://localhost:43434/start_profile -H "Content-Type: application/json"
 # Chat or API call
 curl http://localhost:43434/stop_profile -H "Content-Type: application/json"
