@@ -145,11 +145,8 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        if _is_cuda or _is_hip:
+        if _is_cuda or _is_hip or _is_musa:
             full_nvlink = is_full_nvlink(physical_device_ids, world_size)
-        elif _is_musa:
-            # XXX: Revisit this.
-            full_nvlink = True
 
         if world_size > 2 and not full_nvlink:
             logger.warning(

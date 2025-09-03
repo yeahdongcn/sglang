@@ -18,18 +18,31 @@ import torch.multiprocessing as mp
 from typing_extensions import ParamSpec
 
 from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-from sglang.srt.utils import is_cuda, is_hip
+from sglang.srt.utils import is_cuda, is_hip, is_musa
+import sglang.srt.distributed.device_communicators.mtml_wrapper as mtml_wrapper
+
 
 logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
+_is_musa = is_musa()
 
 if _is_cuda:
     try:
         import pynvml
     except ImportError as e:
         logger.warning("Failed to import pynvml with %r", e)
+
+if _is_musa:
+    try:
+        from sglang.srt.distributed.device_communicators.mtml_wrapper import (
+            MTMLLibrary,
+        )
+
+        pynvml = MTMLLibrary()
+    except ImportError as e:
+        logger.warning("Failed to import mtml_wrapper with %r", e)
 
 if _is_hip:
     try:
