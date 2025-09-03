@@ -8,13 +8,16 @@ import sys
 from collections import OrderedDict, defaultdict
 
 import torch
+import logging
 
 from sglang.srt.utils import is_hip, is_musa
 
+logger = logging.getLogger(__name__)
+
 try:
-    from torch_musa.utils.simple_porting import SimplePorting
     from torch_musa.utils.musa_extension import MUSA_HOME
 except ImportError:
+    logging.error("MUSA_HOME not found, torch-musa may not be installed.")
     MUSA_HOME = None
 
 
