@@ -129,10 +129,10 @@ _is_cpu = is_cpu()
 _device_sm = get_device_sm()
 _is_musa = is_musa()
 
-if _is_musa:
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-else:
-    from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+# if _is_musa:
+#     from vllm.model_executor.layers.fused_moe import FusedMoE
+# else:
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 
 if _is_cuda:
     from sgl_kernel import (

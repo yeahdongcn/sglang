@@ -106,10 +106,7 @@ class RotaryEmbedding(CustomOp):
         if (
             not (_is_cuda or _is_npu) or self.head_size not in [64, 128, 256, 512]
         ) and not (_is_cpu and _is_cpu_amx_available):
-            if _is_musa:
-                from vllm_musa._musa_custom_ops import rotary_embedding
-            else:
-                from vllm._custom_ops import rotary_embedding
+            from vllm._custom_ops import rotary_embedding
 
             self.vllm_rotary_embedding = rotary_embedding
 
@@ -170,6 +167,8 @@ class RotaryEmbedding(CustomOp):
         key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    forward_musa = forward_native
 
     def forward_npu(
         self,
