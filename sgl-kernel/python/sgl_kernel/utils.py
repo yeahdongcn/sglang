@@ -26,9 +26,7 @@ _is_musa = is_musa()
 
 def get_cuda_stream() -> int:
     current_stream = torch.cuda.current_stream()
-    if _is_musa:
-        return current_stream.musa_stream
-    return current_stream.cuda_stream
+    return current_stream.cuda_stream if not _is_musa else current_stream.musa_stream
 
 
 _cache_buf: Dict[Tuple[str, torch.device], torch.Tensor] = {}

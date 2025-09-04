@@ -18,20 +18,20 @@ limitations under the License.
 #include <ATen/Tensor.h>
 #ifdef USE_MUSA
 #include <musa_runtime.h>
-#define cudaSuccess musaSuccess
-#define cudaGetErrorString musaGetErrorString
-#define cudaDeviceProp musaDeviceProp
-#define cudaGetDevice musaGetDevice
-#define cudaError_t musaError_t
-#define cudaDevAttrComputeCapabilityMajor musaDevAttrComputeCapabilityMajor
-#define cudaDevAttrComputeCapabilityMinor musaDevAttrComputeCapabilityMinor
-#define cudaGetDeviceProperties musaGetDeviceProperties
-#define cudaDeviceGetAttribute musaDeviceGetAttribute
-#define cudaGetDeviceCount musaGetDeviceCount
-#define CUdeviceptr MUdeviceptr
 #define CU_POINTER_ATTRIBUTE_RANGE_START_ADDR MU_POINTER_ATTRIBUTE_RANGE_START_ADDR
+#define CUdeviceptr MUdeviceptr
 #define CUDA_SUCCESS MUSA_SUCCESS
 #define cuPointerGetAttribute muPointerGetAttribute
+#define cudaDevAttrComputeCapabilityMajor musaDevAttrComputeCapabilityMajor
+#define cudaDevAttrComputeCapabilityMinor musaDevAttrComputeCapabilityMinor
+#define cudaDeviceGetAttribute musaDeviceGetAttribute
+#define cudaDeviceProp musaDeviceProp
+#define cudaError_t musaError_t
+#define cudaGetDevice musaGetDevice
+#define cudaGetDeviceCount musaGetDeviceCount
+#define cudaGetDeviceProperties musaGetDeviceProperties
+#define cudaGetErrorString musaGetErrorString
+#define cudaSuccess musaSuccess
 using __nv_bfloat16 = __mt_bfloat16;
 using __nv_bfloat162 = __mt_bfloat162;
 using nv_bfloat16 = __mt_bfloat16;

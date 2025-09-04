@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch_musa
 from setuptools import find_packages, setup
 from torch_musa.utils.simple_porting import SimplePorting
 from torch_musa.utils.musa_extension import MUSAExtension, BuildExtension
@@ -57,7 +58,6 @@ SimplePorting(
 
 sources = [
     "csrc_musa/allreduce/custom_all_reduce.mu",
-    # "csrc_musa/allreduce/quick_all_reduce.mu",
     "csrc_musa/common_extension_musa.cc",
     # "csrc_musa/elementwise/activation.mu",
     "csrc_musa/grammar/apply_token_bitmask_inplace_cuda.mu",
@@ -70,38 +70,32 @@ cxx_flags = ["force_mcc"]
 libraries = ["c10", "torch", "torch_python"]
 extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", f"-L/usr/lib/{arch}-linux-gnu"]
 
-default_target = "gfx942"
-amdgpu_target = os.environ.get("AMDGPU_TARGET", default_target)
+default_target = "mp_22"
+mtgpu_target = os.environ.get("MTGPU_TARGET", default_target)
 
-if torch.cuda.is_available():
+if torch.musa.is_available():
     try:
-        amdgpu_target = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+        prop = torch.musa.get_device_properties(0)
+        mtgpu_target = f"mp_{prop.major}{prop.minor}"
     except Exception as e:
         print(f"Warning: Failed to detect GPU properties: {e}")
 else:
-    print(f"Warning: torch.cuda not available. Using default target: {amdgpu_target}")
+    print(f"Warning: torch.musa not available. Using default target: {mtgpu_target}")
 
-if amdgpu_target not in ["gfx942", "gfx950"]:
+if mtgpu_target not in ["mp_22", "mp_31"]:
     print(
-        f"Warning: Unsupported GPU architecture detected '{amdgpu_target}'. Expected 'gfx942' or 'gfx950'."
+        f"Warning: Unsupported GPU architecture detected '{mtgpu_target}'. Expected 'mp_22' or 'mp_31'."
     )
     sys.exit(1)
 
-fp8_macro = (
-    "-DHIP_FP8_TYPE_FNUZ" if amdgpu_target == "gfx942" else "-DHIP_FP8_TYPE_E4M3"
-)
-
-hipcc_flags = [
+mcc_flags = [
     "-DNDEBUG",
     f"-DOPERATOR_NAMESPACE={operator_namespace}",
     "-O3",
     "-fPIC",
     "-std=c++17",
+    f"--cuda-gpu-arch={mtgpu_target}",
     "-DUSE_MUSA"
-    # f"--amdgpu-target={amdgpu_target}",
-    # "-DENABLE_BF16",
-    # "-DENABLE_FP8",
-    # fp8_macro,
 ]
 
 ext_modules = [
@@ -110,7 +104,7 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args={
-            "mcc": hipcc_flags,
+            "mcc": mcc_flags,
             "cxx": cxx_flags,
         },
         libraries=libraries,
