@@ -17,7 +17,21 @@
 
 namespace sglang {
 
+#ifdef USE_MUSA
+constexpr int kMaxBlocks = 72;
+#if __MUSA_ARCH__ >= 310
+constexpr int kDefaultThreads = 64;
+#else
+constexpr int kDefaultThreads = 512;
+#endif
+constexpr int kDefaultBlockLimit = 72;
+constexpr int kMaxThreadsPerBlock = 1024;
+#else
 constexpr int kMaxBlocks = 36;
+constexpr int kDefaultThreads = 512;
+constexpr int kDefaultBlockLimit = 36;
+constexpr int kMaxThreadsPerBlock = 512;
+#endif
 // Counter may overflow, but it's fine since unsigned int overflow is
 // well-defined behavior.
 using FlagType = uint32_t;
@@ -86,7 +100,7 @@ DINLINE float& assign_add(float& a, float b) {
   return a += b;
 }
 
-#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__)) || (__MUSA_ARCH__ >= 220 || !defined(__MUSA_ARCH__))
 DINLINE float upcast_s(nv_bfloat16 val) {
   return __bfloat162float(val);
 }
@@ -188,7 +202,12 @@ static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
 // barrier.
 template <int ngpus, bool is_start, bool need_fence = false>
 DINLINE void multi_gpu_barrier(const RankSignals& sg, Signal* self_sg, int rank) {
-  if constexpr (!is_start) __syncthreads();
+  if constexpr (!is_start)
+#ifdef USE_MUSA
+    __syncthreads_lm();
+#else
+    __syncthreads();
+#endif
   static_assert(!(is_start && need_fence));  // Start barrier shouldn't need fence.
   if (threadIdx.x < ngpus) {
     // Increment the counter. Technically we only need one counter, but we use
@@ -208,7 +227,12 @@ DINLINE void multi_gpu_barrier(const RankSignals& sg, Signal* self_sg, int rank)
         ;
     }
   }
-  if constexpr (is_start || need_fence) __syncthreads();
+  if constexpr (is_start || need_fence)
+#ifdef USE_MUSA
+    __syncthreads_lm();
+#else
+    __syncthreads();
+#endif
 }
 
 template <typename P, int ngpus, typename A>
@@ -222,7 +246,7 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
 }
 
 template <typename T, int ngpus>
-__global__ void __launch_bounds__(512, 1) cross_device_reduce_1stage(
+__global__ void __launch_bounds__(kMaxThreadsPerBlock, 1) cross_device_reduce_1stage(
     RankData* _dp, RankSignals sg, Signal* self_sg, T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
@@ -243,7 +267,7 @@ DINLINE P* get_tmp_buf(Signal* sg) {
 }
 
 template <typename T, int ngpus>
-__global__ void __launch_bounds__(512, 1) cross_device_reduce_2stage(
+__global__ void __launch_bounds__(kMaxThreadsPerBlock, 1) cross_device_reduce_2stage(
     RankData* _dp, RankSignals sg, Signal* self_sg, T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
@@ -435,7 +459,8 @@ class CustomAllreduce {
    * guess is that too many SMs will cause contention on NVLink bus.
    */
   template <typename T>
-  void allreduce(cudaStream_t stream, T* input, T* output, int size, int threads = 512, int block_limit = 36) {
+  void allreduce(cudaStream_t stream, T* input, T* output, int size,
+                 int threads = kDefaultThreads, int block_limit = kDefaultBlockLimit) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(

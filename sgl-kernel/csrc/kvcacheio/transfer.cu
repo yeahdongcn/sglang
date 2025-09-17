@@ -137,8 +137,8 @@ void transfer_kv_launcher(
     const at::Tensor& dst_v_layers,
     int64_t block_quota,
     int64_t num_warps_per_block) {
-  TORCH_CHECK(src_indices.is_cuda(), "Source indices must be a CUDA tensor");
-  TORCH_CHECK(dst_indices.is_cuda(), "Destination indices must be a CUDA tensor");
+  CHECK_CUDA(src_indices);
+  CHECK_CUDA(dst_indices);
   TORCH_CHECK(src_indices.scalar_type() == at::kLong, "Source indices must be of type long");
   TORCH_CHECK(dst_indices.scalar_type() == at::kLong, "Destination indices must be of type long");
   TORCH_CHECK(src_indices.numel() == dst_indices.numel(), "Source and destination indices must have the same length");
