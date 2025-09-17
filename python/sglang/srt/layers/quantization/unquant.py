@@ -25,6 +25,8 @@ from sglang.srt.utils import (
     use_intel_amx_backend,
 )
 
+from vllm_musa import _musa_custom_ops as ops
+
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
@@ -129,7 +131,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if len(x_shapes) == 3:
                 output = output.view(x_shapes[0], x_shapes[1], -1)
             return output
-
+        b = x.shape[0]
+        x_dim, weight_dim = x.dim(), layer.weight.dim()
+        if b < 3 and x_dim == weight_dim == 2 and bias is None:
+            return ops.fused_gemv(x, layer.weight)
         return F.linear(x, layer.weight, bias)
 
 
