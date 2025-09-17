@@ -126,6 +126,8 @@ from sglang.srt.utils import (
     use_intel_amx_backend,
 )
 
+from vllm_musa._musa_custom_ops import (fused_mul_add, gemm_swiglu, gemm_swiglu_w4a16, fused_gemv)
+
 _is_hip = is_hip()
 _is_cuda = is_cuda()
 _is_npu = is_npu()
@@ -239,7 +241,7 @@ class DeepseekV2MLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. "
                 "Only silu is supported for now."
             )
-        self.act_fn = SiluAndMul()
+        self.act_fn = torch.nn.SwishGLU()
 
     def forward(
         self,
@@ -249,24 +251,37 @@ class DeepseekV2MLP(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ):
-        if (self.tp_size == 1) and x.shape[0] == 0:
-            return x
-
-        if (
-            gemm_output_zero_allocator is not None
-            and x.shape[0] <= 256
-            and self.gate_up_proj.weight.dtype == torch.uint8
-        ):
-            y = gemm_output_zero_allocator.allocate(
-                x.shape[0] * self.gate_up_proj.output_size_per_partition
-            ).view(x.shape[0], self.gate_up_proj.output_size_per_partition)
-            x = (x, None, y)
-
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(
-            x, skip_all_reduce=should_allreduce_fusion or use_reduce_scatter
-        )
+        batch = x.shape[0]
+        if (batch >= 4):
+            # TODO: 此部分考虑后续并发较高的情况，根据算子性能保留项，但是此处会增加一份weight，后续可能会删除此部分推理代码
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
+            x, _ = self.down_proj(x)
+        else:
+            if (hasattr(self.gate_up_proj, "qweight")): # w4a16
+                if self.gate_up_proj.quant_method.quant_config.group_size != -1:
+                    x = fused_gemv(
+                        x,
+                        self.gate_up_proj.qweight,
+                        None,
+                        self.gate_up_proj.scales,
+                        use_swigelu=True)
+                    x, _ = self.down_proj(x)
+                else:
+                    out_dim = self.gate_up_proj.qweight.shape[0] // 2
+                    out = torch.empty(batch, out_dim, device=x.device, dtype=x.dtype)
+                    gemm_swiglu_w4a16(out, x, self.gate_up_proj.qweight_t, self.gate_up_proj.scales)
+                    x, _ = self.down_proj(out)
+            else:   #bf16
+                if  (hasattr(self.gate_up_proj, "fused_swiglu_weight")):
+                    out_dim = self.gate_up_proj.weight.shape[0] // 2
+                    out = torch.empty(batch, out_dim, device=x.device, dtype=x.dtype)
+                    gemm_swiglu(out, x, self.gate_up_proj.fused_swiglu_weight, alpha=1.0)
+                    x, _ = self.down_proj(out)
+                else:
+                    gate_up, _ = self.gate_up_proj(x)
+                    x = self.act_fn(gate_up)
+                    x, _ = self.down_proj(x)
         return x
 
 

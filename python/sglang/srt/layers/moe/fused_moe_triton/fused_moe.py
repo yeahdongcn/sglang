@@ -56,6 +56,7 @@ elif _is_musa:
 
 padding_size = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
 
+from vllm_musa import _musa_custom_ops as ops
 
 def inplace_fused_experts(
     hidden_states: torch.Tensor,
@@ -363,6 +364,7 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
+
     no_combine: bool = False,
     routed_scaling_factor: Optional[float] = None,
     gemm1_alpha: Optional[float] = None,
@@ -466,143 +468,170 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
+        top_k_num = topk_ids.shape[1]
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], E
-        )
+        # 3 fused_moe kernels for performance concern:
+        #   * gemv
+        #   * mutlass
+        #   * triton
+        ENABLE_TRITON_MOE = bool(int(os.getenv("VLLM_MUSA_ENABLE_MOE_TRITON", "0")))
+        use_gemv_fused_moe = True
+        # if not use_gemv_fused_moe:
+        #     qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
+        #         A=curr_hidden_states,
+        #         A_scale=a1_scale,
+        #         quant_dtype=qtype,
+        #         per_act_token_quant=per_channel_quant,
+        #         block_shape=block_shape)
 
-        invoke_fused_moe_kernel(
-            curr_hidden_states,
-            w1,
-            b1,
-            intermediate_cache1,
-            a1_scale,
-            w1_scale,
-            w1_zp,
-            curr_topk_weights,
-            curr_topk_ids,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            apply_router_weight_on_input,
-            topk_ids.shape[1],
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            per_channel_quant=per_channel_quant,
-            block_shape=block_shape,
-        )
-        if activation == "silu":
-            if gemm1_alpha is not None:
-                assert gemm1_limit is not None
-                intermediate_cache2 = swiglu_with_alpha_and_limit(
-                    intermediate_cache1.view(-1, N),
-                    gemm1_alpha,
-                    gemm1_limit,
-                )
-            elif _is_cuda or _is_hip:
-                silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
+        if use_gemv_fused_moe:
+            sorted_token_ids = torch.empty(0, dtype=curr_topk_ids.dtype)
+            expert_ids = torch.empty(0, dtype=curr_topk_ids.dtype)
+            num_tokens_post_padded = torch.empty(0, dtype=curr_topk_ids.dtype)
+            # if expert_map is not None: # For EP
+            #     curr_topk_ids = expert_map[curr_topk_ids]
+        else: # use triton fused moe or mutlass fused moe
+            # sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+            #                          global_num_experts, expert_map))
+            print("Only gemv fused moe is supported in musa now")
+
+        if not ENABLE_TRITON_MOE:
+            # w16a16, w4a16 per-channel and w4a16 per-group musa gemv kernel
+            if use_gemv_fused_moe:
+                ops.fused_moe_gemv(curr_hidden_states,
+                                    w1,
+                                    intermediate_cache2,
+                                    None,
+                                    w1_scale,
+                                    curr_topk_weights,
+                                    curr_topk_ids,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    apply_router_weight_on_input,
+                                    top_k_num,
+                                    use_int4_w4a16,
+                                    use_swigelu=True)
+            # w16a16, w4a16 per-channel and w4a16 per-group mutlass gemm kernel
             else:
-                vllm_ops.silu_and_mul(
-                    intermediate_cache2, intermediate_cache1.view(-1, N)
-                )
-        elif activation == "gelu":
-            assert gemm1_alpha is None, "gemm1_alpha is not supported for gelu"
-            assert gemm1_limit is None, "gemm1_limit is not supported for gelu"
-            if _is_cuda or _is_hip:
-                gelu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
-            else:
-                vllm_ops.gelu_and_mul(
-                    intermediate_cache2, intermediate_cache1.view(-1, N)
-                )
+                ops.fused_moe_mutlass(
+                                    curr_hidden_states,
+                                    w1,
+                                    intermediate_cache1,
+                                    None,
+                                    w1_scale,
+                                    curr_topk_weights,
+                                    curr_topk_ids,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    apply_router_weight_on_input,
+                                    top_k_num,
+                                    use_int4_w4a16,
+                                    config['BLOCK_SIZE_M'],
+                                    config['BLOCK_SIZE_N'],
+                                    config['BLOCK_SIZE_K'],
+                                    config['GROUP_SIZE_M'],
+                                    block_shape,
+                                    )
         else:
-            raise ValueError(f"Unsupported activation: {activation=}")
+            print("Only gemv fused moe is supported in musa now")
+            # invoke_fused_moe_kernel(qcurr_hidden_states,
+            #                         w1,
+            #                         intermediate_cache1,
+            #                         a1q_scale,
+            #                         w1_scale,
+            #                         w1_zp,
+            #                         curr_topk_weights,
+            #                         sorted_token_ids,
+            #                         expert_ids,
+            #                         num_tokens_post_padded,
+            #                         apply_router_weight_on_input,
+            #                         topk_ids.shape[1],
+            #                         config,
+            #                         compute_type=compute_type,
+            #                         use_fp8_w8a8=use_fp8_w8a8,
+            #                         use_int8_w8a8=use_int8_w8a8,
+            #                         use_int8_w8a16=use_int8_w8a16,
+            #                         use_int4_w4a16=use_int4_w4a16,
+            #                         per_channel_quant=per_channel_quant,
+            #                         block_shape=block_shape)
 
-        invoke_fused_moe_kernel(
-            intermediate_cache2,
-            w2,
-            b2,
-            (
-                intermediate_cache3
-                if not no_combine and topk_ids.shape[1] != 1
-                else out_hidden_states[begin_chunk_idx:end_chunk_idx].unsqueeze(0)
-            ),
-            a2_scale,
-            w2_scale,
-            w2_zp,
-            curr_topk_weights,
-            curr_topk_ids,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            not apply_router_weight_on_input,
-            1,
-            config,
-            compute_type=compute_type,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            per_channel_quant=per_channel_quant,
-            block_shape=block_shape,
-        )
+        if not use_gemv_fused_moe:
+            # intermediate_cache2 = F.swish_glu(intermediate_cache1.view(-1, N))
+            # qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+            #     A=intermediate_cache2,
+            #     A_scale=a2_scale,
+            #     quant_dtype=qtype,
+            #     per_act_token_quant=per_channel_quant,
+            #     block_shape=block_shape)
+            print("Only gemv fused moe is supported in musa now")
 
-        if routed_scaling_factor is None:
-            routed_scaling_factor = 1.0
-
-        if no_combine:
-            pass
-        elif _is_cuda:
-            if topk_ids.shape[1] == 1 and routed_scaling_factor == 1.0:
-                pass  # we write directly into out_hidden_states
-            elif topk_ids.shape[1] == 2 and routed_scaling_factor == 1.0:
-                torch.add(
-                    intermediate_cache3[:, 0],
-                    intermediate_cache3[:, 1],
-                    out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                ).squeeze(dim=1)
+        if not ENABLE_TRITON_MOE:
+            # w16a16, w4a16 per-channel and w4a16 per-group musa gemv kernel
+            if use_gemv_fused_moe:
+                ops.fused_moe_gemv(intermediate_cache2,
+                                    w2,
+                                    intermediate_cache3,
+                                    None,
+                                    w2_scale,
+                                    curr_topk_weights,
+                                    curr_topk_ids,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    not apply_router_weight_on_input,
+                                    1,
+                                    use_int4_w4a16,
+                                    use_swigelu=False)
+            # w16a16, w4a16 per-channel and w4a16 per-group mutlass gemm kernel
             else:
-                # According to micro benchmark results, torch.compile can get better performance for small token.
-                if tokens_in_chunk <= 32:
-                    moe_sum_reduce_torch_compile(
-                        intermediate_cache3.view(*intermediate_cache3.shape),
-                        out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                        routed_scaling_factor,
-                    )
-                else:
-                    moe_sum_reduce_triton(
-                        intermediate_cache3.view(*intermediate_cache3.shape),
-                        out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                        routed_scaling_factor,
-                    )
-        elif _is_hip:
-            if _use_aiter:
-                moe_sum(
-                    intermediate_cache3.view(*intermediate_cache3.shape),
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                )
-            else:
-                # According to micro benchmark results, torch.compile can get better performance for small token.
-                if tokens_in_chunk <= 32:
-                    moe_sum_reduce_torch_compile(
-                        intermediate_cache3.view(*intermediate_cache3.shape),
-                        out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                        routed_scaling_factor,
-                    )
-                else:
-                    moe_sum_reduce_triton(
-                        intermediate_cache3.view(*intermediate_cache3.shape),
-                        out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                        routed_scaling_factor,
-                    )
+                ops.fused_moe_mutlass(
+                                    intermediate_cache2,
+                                    w2,
+                                    intermediate_cache3,
+                                    None,
+                                    w2_scale,
+                                    curr_topk_weights,
+                                    curr_topk_ids,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    not apply_router_weight_on_input,
+                                    1,
+                                    use_int4_w4a16,
+                                    config['BLOCK_SIZE_M'],
+                                    config['BLOCK_SIZE_N'],
+                                    config['BLOCK_SIZE_K'],
+                                    config['GROUP_SIZE_M'],
+                                    block_shape,
+                                    )
         else:
-            vllm_ops.moe_sum(
-                intermediate_cache3.view(*intermediate_cache3.shape),
-                out_hidden_states[begin_chunk_idx:end_chunk_idx],
-            )
+            # invoke_fused_moe_kernel(qintermediate_cache2,
+            #                         w2,
+            #                         intermediate_cache3,
+            #                         a2q_scale,
+            #                         w2_scale,
+            #                         w2_zp,
+            #                         curr_topk_weights,
+            #                         sorted_token_ids,
+            #                         expert_ids,
+            #                         num_tokens_post_padded,
+            #                         not apply_router_weight_on_input,
+            #                         1,
+            #                         config,
+            #                         compute_type=compute_type,
+            #                         use_fp8_w8a8=use_fp8_w8a8,
+            #                         use_int8_w8a8=use_int8_w8a8,
+            #                         use_int8_w8a16=use_int8_w8a16,
+            #                         use_int4_w4a16=use_int4_w4a16,
+            #                         per_channel_quant=per_channel_quant,
+            #                         block_shape=block_shape)
+            print("Only gemv fused moe is supported in musa now")
+
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
 
     return out_hidden_states
 
