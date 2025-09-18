@@ -9,10 +9,11 @@ import psutil
 import torch
 
 from sglang.srt.mem_cache.memory_pool import KVCache, MHATokenToKVPool, MLATokenToKVPool
-from sglang.srt.utils import is_npu, is_xpu
+from sglang.srt.utils import is_musa, is_npu, is_xpu
 
 _is_npu = is_npu()
 _is_xpu = is_xpu()
+_is_musa = is_musa()
 if not (_is_npu or _is_xpu):
     from sgl_kernel.kvcacheio import (
         transfer_kv_all_layer,
@@ -69,6 +70,9 @@ class HostKVCache(abc.ABC):
         self.device_pool = device_pool
         self.page_size = page_size
         self.layout = layout
+        # torch_musa OOM when pin_memory is True
+        if _is_musa:
+            pin_memory = False
         self.pin_memory = pin_memory
         self.device = device
 
@@ -296,12 +300,12 @@ class MHATokenToKVPoolHost(HostKVCache):
         self.v_data_refs = [self.v_buffer[i] for i in range(self.layer_num)]
         self.k_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.k_data_refs],
-            dtype=torch.uint64,
+            dtype=torch.uint64 if not _is_musa else torch.int64,
             device=self.device_pool.device,
         )
         self.v_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.v_data_refs],
-            dtype=torch.uint64,
+            dtype=torch.uint64 if not _is_musa else torch.int64,
             device=self.device_pool.device,
         )
 
@@ -575,10 +579,12 @@ class MLATokenToKVPoolHost(HostKVCache):
             pin_memory,
             device,
         )
+        print("yeahdongcn")
+        print(device)
         self.data_refs = [self.kv_buffer[i] for i in range(self.layer_num)]
         self.data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.data_refs],
-            dtype=torch.uint64,
+            dtype=torch.uint64 if not _is_musa else torch.int64,
             device=self.device_pool.device,
         )
 
