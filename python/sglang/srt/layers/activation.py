@@ -380,7 +380,7 @@ if not (
     or (_is_cpu and _is_cpu_amx_available)
     or _is_hip
     or _is_xpu
-    # or _is_musa
+    or _is_musa
 ):
     logger.info(
         "sgl-kernel is not available on Non-NV, Non-AMD platforms or Non-AMX CPUs. Fallback to other kernel libraries."
