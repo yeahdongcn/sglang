@@ -317,7 +317,7 @@ class MoEGate(nn.Module):
 
         # NOTE: For some unknown reason, router_gemm seems degrade accept length.
         if (
-            ((_is_cuda and _device_sm >= 90) or (_is_musa or _device_sm >= 31))
+            ((_is_cuda and _device_sm >= 90))
             and hidden_states.shape[0] <= 16
             and hidden_states.shape[1] == 7168
             and self.weight.shape[0] == 256
@@ -582,15 +582,21 @@ class DeepseekV2MoE(nn.Module):
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
-        if not _is_cuda and not _use_aiter:
-            # fused in biased_grouped_topk so we can skip here
-            final_hidden_states *= self.routed_scaling_factor
-        if shared_output is not None:
-            with use_symmetric_memory(parallel_state.get_tp_group()) as sm:
-                final_hidden_states_out = torch.empty_like(final_hidden_states)
-            torch.add(final_hidden_states, shared_output, out=final_hidden_states_out)
-            final_hidden_states = final_hidden_states_out
-            sm.tag(final_hidden_states)
+        # if not _is_cuda and not _use_aiter:
+        #     # fused in biased_grouped_topk so we can skip here
+        #     final_hidden_states *= self.routed_scaling_factor
+        # if shared_output is not None:
+        #     with use_symmetric_memory(parallel_state.get_tp_group()) as sm:
+        #         final_hidden_states_out = torch.empty_like(final_hidden_states)
+        #     torch.add(final_hidden_states, shared_output, out=final_hidden_states_out)
+        #     final_hidden_states = final_hidden_states_out
+        #     sm.tag(final_hidden_states)
+        final_hidden_states = fused_mul_add(
+            final_hidden_states,
+            shared_output,
+            self.routed_scaling_factor,
+            accurate=False  # set to true if meets precision problem
+        )
         if (
             self.tp_size > 1
             and not should_allreduce_fusion
@@ -1007,7 +1013,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             and self.fused_qkv_a_proj_with_mqa.weight.dtype == torch.bfloat16
             and self.fused_qkv_a_proj_with_mqa.weight.shape[0] == 2112
             and self.fused_qkv_a_proj_with_mqa.weight.shape[1] == 7168
-            and ((_is_cuda and _device_sm >= 90) or (_is_musa or _device_sm >= 31))
+            and ((_is_cuda and _device_sm >= 90))
         )
 
         self.qkv_proj_with_rope_is_int8 = (

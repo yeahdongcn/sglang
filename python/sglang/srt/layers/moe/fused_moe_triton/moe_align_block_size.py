@@ -13,7 +13,7 @@ _is_musa = is_musa()
 
 if _is_cuda or _is_hip or _is_musa:
     from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
-
+from vllm_musa import _musa_custom_ops as ops
 
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
@@ -75,14 +75,29 @@ def moe_align_block_size(
     if not fuse_sorted_ids_padding:
         sorted_ids.fill_(topk_ids.numel())
 
-    sgl_moe_align_block_size(
-        topk_ids,
-        num_experts + 1,
-        block_size,
-        sorted_ids,
-        expert_ids,
-        num_tokens_post_pad,
-        cumsum_buffer,
-        fuse_sorted_ids_padding,
-    )
+    if num_experts >= 224:
+        if num_experts != 256:
+            sgl_moe_align_block_size(
+                topk_ids,
+                num_experts + 1,
+                block_size,
+                sorted_ids,
+                expert_ids,
+                num_tokens_post_pad,
+                cumsum_buffer,
+                fuse_sorted_ids_padding,
+            )
+        else:
+            # Currently requires num_experts=256
+            ops.sgl_moe_align_block_size(
+                topk_ids,
+                num_experts,
+                block_size,
+                sorted_ids,
+                expert_ids,
+                num_tokens_post_pad,
+            )
+    else:
+        ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
+                                 expert_ids, num_tokens_post_pad)
     return sorted_ids, expert_ids, num_tokens_post_pad

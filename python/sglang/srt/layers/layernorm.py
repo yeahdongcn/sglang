@@ -59,7 +59,8 @@ elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 
     _vllm_version = Version(vllm.__version__)
-
+elif _is_musa:
+    from vllm_musa._musa_custom_ops import fused_add_rms_norm, rms_norm
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,18 @@ class RMSNorm(CustomOp):
                     self.variance_epsilon,
                 )
                 return output, residual_out
+        out = torch.empty_like(x)
+        rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        return out
+
+    def forward_musa(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
+            return x, residual
         out = torch.empty_like(x)
         rms_norm(out, x, self.weight.data, self.variance_epsilon)
         return out
