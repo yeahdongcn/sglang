@@ -25,7 +25,10 @@ from sglang.srt.utils import (
     use_intel_amx_backend,
 )
 
-from vllm_musa import _musa_custom_ops as ops
+from sglang.srt.utils import is_musa
+_is_musa = is_musa()
+if _is_musa:
+    from vllm_musa import _musa_custom_ops as ops
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (

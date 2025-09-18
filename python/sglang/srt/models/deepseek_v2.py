@@ -27,6 +27,10 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 from transformers import PretrainedConfig
+from sglang.srt.utils import is_musa
+_is_musa = is_musa()
+if _is_musa:
+    from vllm_musa import _musa_custom_ops as ops
 
 from sglang.srt.distributed import (
     get_moe_expert_parallel_world_size,
@@ -331,7 +335,12 @@ class MoEGate(nn.Module):
                 hidden_states, self.weight, gemm_output_zero_allocator
             )
         else:
-            logits = F.linear(hidden_states, self.weight, None)
+            b = hidden_states.shape[0]
+            x_dim, weight_dim = hidden_states.dim(), self.weight.dim()
+            if b < 3 and x_dim == weight_dim == 2:
+                logits= ops.fused_gemv(hidden_states, self.weight)
+            else:
+                logits = F.linear(hidden_states, self.weight, None)
 
         return logits
 
