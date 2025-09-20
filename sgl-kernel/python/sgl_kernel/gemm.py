@@ -2,7 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 from sgl_kernel.scalar_type import ScalarType
-from sgl_kernel.utils import _get_cache_buf, get_cuda_stream
+from sgl_kernel.utils import _get_cache_buf, get_cuda_stream, _is_musa
 
 
 def awq_dequantize(
@@ -51,7 +51,10 @@ def _bmm_fp8_internal(
     A_scale: torch.Tensor,
     B_scale: torch.Tensor,
 ) -> None:
-    cublas_handle = torch.cuda.current_blas_handle()
+    if _is_musa:
+        cublas_handle = 0
+    else:
+        cublas_handle = torch.cuda.current_blas_handle()
     torch.ops.sgl_kernel.bmm_fp8.default(
         A,
         B,
@@ -79,6 +82,13 @@ def bmm_fp8(
             dtype=dtype,
         )
     workspace_buffer = _get_cache_buf("bmm_fp8_workspace", 32 * 1024 * 1024, A.device)
+    # raise RuntimeError(
+    #     f"A.device: {A.device}, A.dtype: {A.dtype}, A.dims: {A.dim()}, A.shape: {A.shape}; "
+    #     f"B.device: {B.device}, B.dtype: {B.dtype}, B.dims: {B.dim()}, B.shape: {B.shape}; "
+    #     f"out.device: {out.device}, out.dtype: {out.dtype}, out.dims: {out.dim()}, out.shape: {out.shape}; "
+    #     f"A_scale.device: {A_scale.device}, A_scale.dtype: {A_scale.dtype}, A_scale.dims: {A_scale.dim()}, A_scale.shape: {A_scale.shape}; "
+    #     f"B_scale.device: {B_scale.device}, B_scale.dtype: {B_scale.dtype}, B_scale.dims: {B_scale.dim()}, B_scale.shape: {B_scale.shape}"
+    # )
     _bmm_fp8_internal(workspace_buffer, A, B, out, A_scale, B_scale)
     return out
 

@@ -156,6 +156,22 @@ class RMSNorm(CustomOp):
         rms_norm(out, x, self.weight.data, self.variance_epsilon)
         return out
 
+    def forward_musa(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm_musa._musa_custom_ops import fused_add_rms_norm, rms_norm
+
+        if not x.is_contiguous():
+            x = x.contiguous()
+        if residual is not None:
+            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
+            return x, residual
+        out = torch.empty_like(x)
+        rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        return out
+
     def forward_native(
         self,
         x: torch.Tensor,

@@ -29,9 +29,11 @@ void bmm_fp8(
     at::Tensor workspace_buffer,
     int64_t cublas_handle,
     int64_t cuda_stream) {
+#ifndef USE_MUSA
   TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
   TORCH_CHECK(B.is_cuda(), "B must be a CUDA tensor");
   TORCH_CHECK(D.is_cuda(), "D must be a CUDA tensor");
+#endif
   TORCH_CHECK(A.dim() == 3, "Expected 3D tensor for A");
   TORCH_CHECK(B.dim() == 3, "Expected 3D tensor for B");
   TORCH_CHECK(D.dim() == 3, "Expected 3D tensor for D");
@@ -50,7 +52,16 @@ void bmm_fp8(
         auto k = A.size(2);
         auto n = B.size(2);
 
+#ifdef USE_MUSA
+        mublasLtHandle_t h;
+        mublasStatus_t status1 = mublasLtCreate(&h);
+        if (status1 != MUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("Failed to create MUSA BlasLt handle, status: " + std::to_string(status1));
+        }
+        auto lt_handle = h;
+#else
         auto lt_handle = reinterpret_cast<cublasLtHandle_t>(cublas_handle);
+#endif
         auto stream = reinterpret_cast<cudaStream_t>(cuda_stream);
 
         auto status = flashinfer::bmm_fp8::bmm_fp8_internal_cublaslt(

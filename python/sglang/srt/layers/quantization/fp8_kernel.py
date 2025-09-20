@@ -33,6 +33,7 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_hip,
+    is_musa,
     log_info_on_rank0,
     supports_custom_op,
 )
@@ -40,6 +41,7 @@ from sglang.srt.utils import (
 _is_hip = is_hip()
 _is_cuda = is_cuda()
 _is_cpu = is_cpu()
+_is_musa = is_musa()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_cuda:
@@ -64,6 +66,9 @@ if _is_hip:
             import vllm._C
         except ImportError:
             raise ImportError("vllm is required when SGLANG_USE_AITER is set to False")
+
+if _is_musa:
+    from vllm_musa import _musa_custom_ops as ops
 
 logger = logging.getLogger(__name__)
 
@@ -951,7 +956,7 @@ def select_w8a8_block_fp8_matmul_kernel(M, N, META):
     return _w8a8_block_fp8_matmul
 
 
-if _is_hip:
+if _is_hip or _is_musa:
 
     def use_w8a8_block_fp8_matmul_unrolledx4(M, N, META):
         # Use manually unrolledx4 kernel on AMD GPU when the grid size is small.
@@ -1353,7 +1358,7 @@ Returns:
 Raises:
     AssertionError: If input is not 2D or if static scale's numel != 1
 """
-if _is_hip:
+if _is_hip or _is_musa:
 
     def scaled_fp8_quant(
         input: torch.Tensor,
@@ -1375,6 +1380,10 @@ if _is_hip:
                 )
                 if _use_aiter:
                     dynamic_per_token_scaled_quant(output, input, scale)
+                elif _is_musa:
+                    ops.dynamic_per_token_scaled_fp8_quant(
+                        output, input.contiguous(), scale, None
+                    )
                 else:
                     torch.ops._C.dynamic_per_token_scaled_fp8_quant(
                         output, input.contiguous(), scale, None
@@ -1383,6 +1392,8 @@ if _is_hip:
                 scale = torch.zeros(1, device=input.device, dtype=torch.float32)
                 if _use_aiter:
                     dynamic_per_tensor_quant(output, input, scale)
+                elif _is_musa:
+                    ops.dynamic_scaled_fp8_quant(output, input, scale)
                 else:
                     torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
         else:
@@ -1392,6 +1403,8 @@ if _is_hip:
             ), f"Expected scalar scale, got numel={scale.numel()}"
             if _use_aiter:
                 static_per_tensor_quant(output, input, scale)
+            elif _is_musa:
+                ops.static_scaled_fp8_quant(output, input, scale)
             else:
                 torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 

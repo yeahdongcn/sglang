@@ -819,20 +819,34 @@ def select_experts(
                 apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
             )
         else:
-            topk_weights, topk_ids = biased_grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                correction_bias=correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                num_fused_shared_experts=num_fused_shared_experts,
-                routed_scaling_factor=routed_scaling_factor,
-                num_token_non_padded=num_token_non_padded,
-                expert_location_dispatch_info=expert_location_dispatch_info,
-                apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
-            )
+            if _is_musa and topk_group % 2 == 0:
+                from vllm_musa import _musa_custom_ops as ops
+
+                topk_weights, topk_ids = ops.fused_grouped_topk(
+                    router_logits,
+                    top_k,
+                    renormalize,
+                    num_expert_group,
+                    topk_group,
+                    correction_bias,
+                )
+
+                return topk_weights, topk_ids.to(torch.int32)
+            else:
+                topk_weights, topk_ids = biased_grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    correction_bias=correction_bias,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    num_fused_shared_experts=num_fused_shared_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                    num_token_non_padded=num_token_non_padded,
+                    expert_location_dispatch_info=expert_location_dispatch_info,
+                    apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+                )
     elif torch_native and custom_routing_function is None:
         assert (
             num_token_non_padded is None

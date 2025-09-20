@@ -175,6 +175,9 @@ if _is_hip:
         decode_attention_fwd_grouped_rope,
     )
 
+if _is_musa:
+    from vllm_musa import _musa_custom_ops as ops
+
 _is_flashinfer_available = is_flashinfer_available()
 _is_sm100_supported = is_cuda() and is_sm100_supported()
 
@@ -262,11 +265,34 @@ class DeepseekV2MLP(nn.Module):
             ).view(x.shape[0], self.gate_up_proj.output_size_per_partition)
             x = (x, None, y)
 
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(
-            x, skip_all_reduce=should_allreduce_fusion or use_reduce_scatter
-        )
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
+            x, _ = self.down_proj(x)
+        else:
+            if (hasattr(self.gate_up_proj, "qweight")): # w4a16
+                if self.gate_up_proj.quant_method.quant_config.group_size != -1:
+                    x = ops.fused_gemv(
+                        x,
+                        self.gate_up_proj.qweight,
+                        None,
+                        self.gate_up_proj.scales,
+                        use_swigelu=True)
+                    x, _ = self.down_proj(x)
+                else:
+                    out_dim = self.gate_up_proj.qweight.shape[0] // 2
+                    out = torch.empty(batch, out_dim, device=x.device, dtype=x.dtype)
+                    ops.gemm_swiglu_w4a16(out, x, self.gate_up_proj.qweight_t, self.gate_up_proj.scales)
+                    x, _ = self.down_proj(out)
+            else:   #bf16
+                if  (hasattr(self.gate_up_proj, "fused_swiglu_weight")):
+                    out_dim = self.gate_up_proj.weight.shape[0] // 2
+                    out = torch.empty(batch, out_dim, device=x.device, dtype=x.dtype)
+                    ops.gemm_swiglu(out, x, self.gate_up_proj.fused_swiglu_weight, alpha=1.0)
+                    x, _ = self.down_proj(out)
+                else:
+                    gate_up, _ = self.gate_up_proj(x)
+                    x = self.act_fn(gate_up)
+                    x, _ = self.down_proj(x)
         return x
 
 
@@ -302,7 +328,7 @@ class MoEGate(nn.Module):
 
         # NOTE: For some unknown reason, router_gemm seems degrade accept length.
         if (
-            ((_is_cuda and _device_sm >= 90) or (_is_musa or _device_sm >= 31))
+            ((_is_cuda and _device_sm >= 90))
             and hidden_states.shape[0] <= 16
             and hidden_states.shape[1] == 7168
             and self.weight.shape[0] == 256
@@ -316,7 +342,12 @@ class MoEGate(nn.Module):
                 hidden_states, self.weight, gemm_output_zero_allocator
             )
         else:
-            logits = F.linear(hidden_states, self.weight, None)
+            b = hidden_states.shape[0]
+            x_dim, weight_dim = hidden_states.dim(), self.weight.dim()
+            if b < 3 and x_dim == weight_dim == 2:
+                logits= ops.fused_gemv(hidden_states, self.weight)
+            else:
+                logits = F.linear(hidden_states, self.weight, None)
 
         return logits
 
@@ -992,7 +1023,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             and self.fused_qkv_a_proj_with_mqa.weight.dtype == torch.bfloat16
             and self.fused_qkv_a_proj_with_mqa.weight.shape[0] == 2112
             and self.fused_qkv_a_proj_with_mqa.weight.shape[1] == 7168
-            and ((_is_cuda and _device_sm >= 90) or (_is_musa or _device_sm >= 31))
+            and ((_is_cuda and _device_sm >= 90))
         )
 
         self.qkv_proj_with_rope_is_int8 = (
@@ -1420,7 +1451,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 expected_m,
             )
             q_nope_out = q_nope_out[:, :expected_m, :]
-        elif _is_hip:
+        elif _is_hip or _is_musa:
             # TODO(haishaw): add bmm_fp8 to ROCm
             if _use_aiter_gfx95 and self.w_kc.dtype == torch.uint8:
                 x = q_nope.transpose(0, 1)
@@ -1532,7 +1563,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             attn_bmm_output = (
                 attn_bmm_output[:, :expected_m, :].transpose(0, 1).flatten(1, 2)
             )
-        elif _is_hip:
+        elif _is_hip or _is_musa:
             # TODO(haishaw): add bmm_fp8 to ROCm
             if _use_aiter_gfx95 and self.w_vc.dtype == torch.uint8:
                 x = attn_output.transpose(0, 1)
@@ -1630,7 +1661,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        if _is_hip:
+        if _is_hip or _is_musa:
             # TODO(haishaw): add bmm_fp8 to ROCm
             q_nope_out = torch.bmm(
                 q_nope.to(torch.bfloat16).transpose(0, 1),
@@ -1823,7 +1854,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-        if _is_hip:
+        if _is_hip or _is_musa:
             # TODO(haishaw): add bmm_fp8 to ROCm
             attn_bmm_output = torch.bmm(
                 attn_output.to(torch.bfloat16).transpose(0, 1),
