@@ -2,14 +2,17 @@ import logging
 
 import torch
 
-from sglang.srt.utils import get_bool_env_var, get_device_sm
+from sglang.srt.utils import get_bool_env_var, get_device_sm, is_musa
 
 logger = logging.getLogger(__name__)
 
 
 def _compute_enable_deep_gemm():
     sm_version = get_device_sm()
-    if sm_version < 90:
+    if is_musa():
+        if sm_version < 31:
+            return False
+    elif sm_version < 90:
         return False
 
     try:

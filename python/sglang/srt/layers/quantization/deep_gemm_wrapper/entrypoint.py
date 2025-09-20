@@ -11,13 +11,14 @@ from sglang.srt.layers.quantization.deep_gemm_wrapper.configurer import (
     ENABLE_JIT_DEEPGEMM,
 )
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_bool_env_var
+from sglang.srt.utils import get_bool_env_var, is_musa
 
 logger = logging.getLogger(__name__)
 
 if ENABLE_JIT_DEEPGEMM:
     import deep_gemm
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
+    if not is_musa():
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
 
 _SANITY_CHECK = get_bool_env_var("SGLANG_DEEPGEMM_SANITY_CHECK")
 
