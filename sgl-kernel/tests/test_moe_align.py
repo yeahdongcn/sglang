@@ -5,6 +5,7 @@ import torch
 import triton
 import triton.language as tl
 from sgl_kernel import moe_align_block_size
+from utils import get_device
 
 
 def ceil_div(a, b):
@@ -152,10 +153,9 @@ def moe_align_block_size_triton(
 def test_moe_align_block_size_compare_implementations(
     block_size, num_tokens, topk, num_experts, pad_sorted_token_ids
 ):
-
-    topk_ids = torch.argsort(torch.rand(num_tokens, num_experts, device="cuda"), dim=1)[
-        :, :topk
-    ]
+    topk_ids = torch.argsort(
+        torch.rand(num_tokens, num_experts, device=get_device()), dim=1
+    )[:, :topk]
 
     max_num_tokens_padded = topk_ids.numel() + (num_experts + 1) * (block_size - 1)
 

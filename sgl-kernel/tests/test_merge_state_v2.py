@@ -5,6 +5,7 @@ import torch
 import triton
 import triton.language as tl
 from sgl_kernel import merge_state, merge_state_v2
+from utils import get_device
 
 
 @triton.jit
@@ -211,8 +212,12 @@ def test_merge_attn_states(
     )
 
     # prefix_lse and suffix_lse contain inf and normal values
-    prefix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="cuda")
-    suffix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="cuda")
+    prefix_lse = torch.randn(
+        NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device=get_device()
+    )
+    suffix_lse = torch.randn(
+        NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device=get_device()
+    )
 
     # Generate boolean masks
     mask_prefix = torch.rand(NUM_TOKENS, NUM_HEADS) < 0.1
@@ -228,16 +233,16 @@ def test_merge_attn_states(
     # Other input tensors (need to be initialized but
     # no actual calculation needed)
     output = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device=get_device()
     )
     output_lse = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS), dtype=torch.float32, device="cuda"
+        (NUM_TOKENS, NUM_HEADS), dtype=torch.float32, device=get_device()
     )
     prefix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device=get_device()
     )
     suffix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device=get_device()
     )
 
     warmup_times = 2

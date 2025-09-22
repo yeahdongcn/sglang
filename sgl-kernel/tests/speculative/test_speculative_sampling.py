@@ -1,7 +1,13 @@
+import os
+import sys
+
 import pytest
 import torch
 import torch.nn.functional as F
 from sgl_kernel import tree_speculative_sampling_target_only
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils import get_device
 
 test_cases = [
     (
@@ -35,7 +41,7 @@ def test_tree_speculative_sampling_target_only(
     """
     Tests the tree_speculative_sampling_target_only function using Pytest parameterization.
     """
-    device = "cuda"
+    device = get_device()
 
     candidates = torch.tensor(
         [
