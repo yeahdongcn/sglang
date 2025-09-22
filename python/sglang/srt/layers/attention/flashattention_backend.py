@@ -14,13 +14,18 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.mem_cache.memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
+from sglang.srt.utils import is_musa
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
 from sgl_kernel import merge_state_v2
-from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+if is_musa():
+    from mate import flash_attn_varlen_func, flash_attn_with_kvcache
+else:
+    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 
 @dataclass
@@ -807,6 +812,11 @@ class FlashAttentionBackend(AttentionBackend):
                 and not forward_batch.forward_mode.is_target_verify()
                 and not forward_batch.forward_mode.is_draft_extend()
             ):
+                kwargs = {}
+                if is_musa:
+                    kwargs["return_attn_probs"] = True
+                else:
+                    kwargs["return_softmax_lse"] = True
                 # Do multi-head attention with chunked prefix cache
                 if forward_batch.attn_attend_prefix_cache:
                     assert not global_server_args_dict["disable_chunked_prefix_cache"]
@@ -829,7 +839,7 @@ class FlashAttentionBackend(AttentionBackend):
                         max_seqlen_k=forward_batch.prefix_chunk_max_seq_lens[chunk_idx],
                         softmax_scale=layer.scaling,
                         causal=False,
-                        return_softmax_lse=True,
+                        **kwargs,
                     )
                 else:
                     # MHA for extend part of sequence without attending prefix kv cache
@@ -843,7 +853,7 @@ class FlashAttentionBackend(AttentionBackend):
                         max_seqlen_k=metadata.max_seq_len_q,
                         softmax_scale=layer.scaling,
                         causal=True,
-                        return_softmax_lse=forward_batch.mha_return_lse,
+                        **kwargs,
                     )
                 if forward_batch.mha_return_lse:
                     output, lse, *rest = output
@@ -895,25 +905,27 @@ class FlashAttentionBackend(AttentionBackend):
                 )
                 if use_cascade_attn:
                     o, softmax_lse, *rest = result
-                    o_expand, softmax_lse_expand, *rest_expand = (
-                        flash_attn_with_kvcache(
-                            q=q_rope,
-                            k_cache=k_rope_cache,
-                            v_cache=c_kv_cache,
-                            qv=q_nope,
-                            page_table=self.forward_metadata_spec_decode_expand.page_table,
-                            cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
-                            cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
-                            cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
-                            max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
-                            softmax_scale=layer.scaling,
-                            causal=False,
-                            window_size=window_size,
-                            softcap=layer.logit_cap,
-                            k_descale=k_descale,
-                            v_descale=v_descale,
-                            return_softmax_lse=True,
-                        )
+                    (
+                        o_expand,
+                        softmax_lse_expand,
+                        *rest_expand,
+                    ) = flash_attn_with_kvcache(
+                        q=q_rope,
+                        k_cache=k_rope_cache,
+                        v_cache=c_kv_cache,
+                        qv=q_nope,
+                        page_table=self.forward_metadata_spec_decode_expand.page_table,
+                        cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
+                        cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
+                        cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
+                        max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
+                        softmax_scale=layer.scaling,
+                        causal=False,
+                        window_size=window_size,
+                        softcap=layer.logit_cap,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        return_softmax_lse=True,
                     )
                     o, _ = merge_state_v2_wrapper(
                         o,
@@ -1081,25 +1093,27 @@ class FlashAttentionBackend(AttentionBackend):
                 )
                 if use_cascade_attn:
                     o, softmax_lse, *rest = result
-                    o_expand, softmax_lse_expand, *rest_expand = (
-                        flash_attn_with_kvcache(
-                            q=q_reshaped,
-                            k_cache=key_cache,
-                            v_cache=value_cache,
-                            page_table=self.forward_metadata_spec_decode_expand.page_table,
-                            cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
-                            cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
-                            cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
-                            max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
-                            softmax_scale=layer.scaling,
-                            causal=False,
-                            window_size=window_size,
-                            softcap=layer.logit_cap,
-                            k_descale=k_descale,
-                            v_descale=v_descale,
-                            return_softmax_lse=True,
-                            **kwargs,
-                        )
+                    (
+                        o_expand,
+                        softmax_lse_expand,
+                        *rest_expand,
+                    ) = flash_attn_with_kvcache(
+                        q=q_reshaped,
+                        k_cache=key_cache,
+                        v_cache=value_cache,
+                        page_table=self.forward_metadata_spec_decode_expand.page_table,
+                        cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
+                        cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
+                        cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
+                        max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
+                        softmax_scale=layer.scaling,
+                        causal=False,
+                        window_size=window_size,
+                        softcap=layer.logit_cap,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        return_softmax_lse=True,
+                        **kwargs,
                     )
                     o, _ = merge_state_v2(
                         o,
@@ -1701,7 +1715,6 @@ class FlashAttentionBackend(AttentionBackend):
         metadata_expand = None
 
         if forward_mode.is_decode_or_idle():
-
             if spec_info is not None:
                 # Draft Decode
                 if self.topk <= 1:
@@ -2275,7 +2288,6 @@ def prepare_swa_spec_page_table_triton(
 
 
 class FlashAttentionMultiStepBackend:
-
     def __init__(
         self, model_runner: ModelRunner, topk: int, speculative_num_steps: int
     ):

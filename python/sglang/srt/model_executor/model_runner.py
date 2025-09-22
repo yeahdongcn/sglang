@@ -132,6 +132,7 @@ from sglang.srt.utils import (
     is_flashinfer_available,
     is_hip,
     is_hopper_with_cuda_12_3,
+    is_musa,
     is_no_spec_infer_or_topk_one,
     is_npu,
     is_sm100_supported,
@@ -147,6 +148,7 @@ from sglang.srt.weight_sync.tensor_bucket import (
 
 _is_hip = is_hip()
 _is_npu = is_npu()
+_is_musa = is_musa()
 _is_cpu_amx_available = cpu_has_amx_support()
 
 # Use a small KV cache pool size for tests in CI
@@ -1790,10 +1792,20 @@ class ModelRunner:
 
             return FlashMLABackend(self)
         elif backend_str == "fa3":
-            assert (
-                torch.cuda.get_device_capability()[0] == 8 and not self.use_mla_backend
-            ) or torch.cuda.get_device_capability()[0] == 9, (
-                "FlashAttention v3 Backend requires SM>=80 and SM<=90. "
+            if _is_musa:
+                condition = (
+                    torch.cuda.get_device_capability()[0] >= 3
+                    and torch.cuda.get_device_capability()[1] >= 1
+                )
+                message = "MP>=31"
+            else:
+                condition = (
+                    torch.cuda.get_device_capability()[0] == 8
+                    and not self.use_mla_backend
+                ) or torch.cuda.get_device_capability()[0] == 9
+                message = "SM>=80 and SM<=90"
+            assert condition, (
+                f"FlashAttention v3 Backend requires {message}. "
                 "Please use `--attention-backend flashinfer`."
             )
             from sglang.srt.layers.attention.flashattention_backend import (
