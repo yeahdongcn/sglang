@@ -1450,7 +1450,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 expected_m,
             )
             q_nope_out = q_nope_out[:, :expected_m, :]
-        elif _is_hip or _is_musa:
+        elif _is_hip:
             # TODO(haishaw): add bmm_fp8 to ROCm
             if _use_aiter_gfx95 and self.w_kc.dtype == torch.uint8:
                 x = q_nope.transpose(0, 1)
@@ -1562,7 +1562,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             attn_bmm_output = (
                 attn_bmm_output[:, :expected_m, :].transpose(0, 1).flatten(1, 2)
             )
-        elif _is_hip or _is_musa:
+        elif _is_hip:
             # TODO(haishaw): add bmm_fp8 to ROCm
             if _use_aiter_gfx95 and self.w_vc.dtype == torch.uint8:
                 x = attn_output.transpose(0, 1)
@@ -1660,7 +1660,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        if _is_hip or _is_musa:
+        if _is_hip:
             # TODO(haishaw): add bmm_fp8 to ROCm
             q_nope_out = torch.bmm(
                 q_nope.to(torch.bfloat16).transpose(0, 1),
@@ -1853,7 +1853,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-        if _is_hip or _is_musa:
+        if _is_hip:
             # TODO(haishaw): add bmm_fp8 to ROCm
             attn_bmm_output = torch.bmm(
                 attn_output.to(torch.bfloat16).transpose(0, 1),
