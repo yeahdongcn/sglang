@@ -39,6 +39,7 @@ from sglang.srt.utils import (
     set_weight_attrs,
 )
 from sglang.utils import resolve_obj_by_qualname
+from sglang.srt.custom_op_backend import custom_ops
 
 _is_cuda = is_cuda()
 _is_npu = is_npu()
@@ -46,14 +47,6 @@ _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
-
-if _is_cuda or _is_xpu:
-    from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
-elif _is_hip:
-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
-
-if is_npu():
-    import torch_npu
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +56,17 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_generic(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        silu_and_mul = custom_ops.get_op("silu_and_mul")
+        assert silu_and_mul is not None, "silu_and_mul op is not available"
         silu_and_mul(x, out)
         return out
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_generic(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
         if _is_cpu_amx_available:
@@ -82,11 +80,7 @@ class SiluAndMul(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        silu_and_mul(x, out)
-        return out
+        return self.forward_generic(x)
 
 
 class GeluAndMul(CustomOp):
