@@ -179,6 +179,15 @@ def is_cpu() -> bool:
     return os.getenv("SGLANG_USE_CPU_ENGINE", "0") == "1" and is_host_cpu_x86()
 
 
+@lru_cache(maxsize=1)
+def is_musa() -> bool:
+    try:
+        import torchada  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch, "musa") and torch.musa.is_available()
+
+
 def is_float4_e2m1fn_x2(dtype) -> bool:
     """Check if dtype is float4_e2m1fn_x2 and CUDA is available."""
     target_dtype = getattr(torch, "float4_e2m1fn_x2", None)
