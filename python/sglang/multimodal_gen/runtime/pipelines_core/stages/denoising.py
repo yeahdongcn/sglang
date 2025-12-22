@@ -35,9 +35,6 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_cfg_group,
     get_classifier_free_guidance_rank,
 )
-from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
-    FlashAttentionBackend,
-)
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.attention.STA_configuration import (
     configure_sta,
@@ -1186,7 +1183,7 @@ class DenoisingStage(PipelineStage):
                     "device": get_local_torch_device(),
                 }
             )
-        elif self.attn_backend == FlashAttentionBackend:
+        elif self.attn_backend.get_name() == "FLASH_ATTN":
             attn_metadata = self.attn_metadata_builder.build(
                 raw_latent_shape=batch.raw_latent_shape
             )
@@ -1509,7 +1506,8 @@ class DenoisingStage(PipelineStage):
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """Verify denoising stage inputs."""
         result = VerificationResult()
-        result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.min_dims(1)])
+        if not current_platform.is_musa():
+            result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.min_dims(1)])
         # disable temporarily for image-generation models
         # result.add_check("latents", batch.latents, [V.is_tensor, V.with_dims(5)])
         result.add_check("prompt_embeds", batch.prompt_embeds, V.list_not_empty)

@@ -71,11 +71,8 @@ def _is_cuda():
 
 
 def _is_musa():
-    try:
-        if hasattr(torch, "musa") and torch.musa.is_available():
-            return True
-    except ModuleNotFoundError:
-        return False
+    has_musa = hasattr(torch.version, "musa") and torch.version.musa is not None
+    return has_musa
 
 
 def _is_mps():

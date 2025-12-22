@@ -43,6 +43,7 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     CPU = enum.auto()
     MPS = enum.auto()
+    MUSA = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -106,10 +107,13 @@ class Platform:
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.MUSA)
 
     def is_mps(self) -> bool:
         return self._enum == PlatformEnum.MPS
+
+    def is_musa(self) -> bool:
+        return self._enum == PlatformEnum.MUSA
 
     @classmethod
     def get_attn_backend_cls_str(

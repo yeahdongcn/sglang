@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -136,6 +137,9 @@ class TimestepPreparationStage(PipelineStage):
         result.add_check(
             "num_inference_steps", batch.num_inference_steps, V.positive_int
         )
+
+        if not current_platform.is_musa():
+            result.add_check("n_tokens", batch.n_tokens, V.none_or_positive_int)
         result.add_check("timesteps", batch.timesteps, V.none_or_tensor)
         result.add_check("sigmas", batch.sigmas, V.none_or_list)
         result.add_check("n_tokens", batch.n_tokens, V.none_or_positive_int)
@@ -144,5 +148,8 @@ class TimestepPreparationStage(PipelineStage):
     def verify_output(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """Verify timestep preparation stage outputs."""
         result = VerificationResult()
-        result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.with_dims(1)])
+        if not current_platform.is_musa():
+            result.add_check(
+                "timesteps", batch.timesteps, [V.is_tensor, V.with_dims(1)]
+            )
         return result
