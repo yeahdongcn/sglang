@@ -474,7 +474,6 @@ class MUSAEnv(BaseEnv):
         """
         Get MUSA driver version.
         """
-        versions = set()
         try:
             output = subprocess.check_output(
                 [
