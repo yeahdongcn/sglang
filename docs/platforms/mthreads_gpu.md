@@ -13,8 +13,13 @@ You can install SGLang using one of the methods below.
 git clone https://github.com/sgl-project/sglang.git
 cd sglang
 
-# Install sglang python package
+# Compile sgl-kernel
 pip install --upgrade pip
+cd sgl-kernel
+python setup_musa.py install
+
+# Install sglang python package
+cd ..
 rm -f python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml
 pip install -e "python[all_musa]"
 ```
