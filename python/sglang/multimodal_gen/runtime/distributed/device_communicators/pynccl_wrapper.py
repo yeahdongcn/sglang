@@ -129,6 +129,13 @@ class Function:
     argtypes: list[Any]
 
 
+def _nccl_to_mccl_func_name(name: str) -> str:
+    """Convert NCCL function name to MCCL (ncclXxx -> mcclXxx)."""
+    if name.startswith("nccl"):
+        return "m" + name[1:]
+    return name
+
+
 class NCCLLibrary:
     exported_functions = [
         # const char* ncclGetErrorString(ncclResult_t result)
@@ -268,6 +275,7 @@ class NCCLLibrary:
     def __init__(self, so_file: str | None = None):
 
         so_file = so_file or find_nccl_library()
+        self._is_mccl = "mccl" in so_file
 
         try:
             if so_file not in NCCLLibrary.path_to_dict_mapping:
@@ -277,7 +285,7 @@ class NCCLLibrary:
         except Exception as e:
             logger.error(
                 "Failed to load NCCL library from %s ."
-                "It is expected if you are not running on NVIDIA/AMD GPUs."
+                "It is expected if you are not running on NVIDIA/AMD/MTHREADS GPUs."
                 "Otherwise, the nccl library might not exist, be corrupted "
                 "or it does not support the current platform %s."
                 "If you already have the library, please set the "
@@ -291,10 +299,14 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
-                f = getattr(self.lib, func.name)
+                # Map nccl* to mccl* for MUSA
+                lib_func_name = (
+                    _nccl_to_mccl_func_name(func.name) if self._is_mccl else func.name
+                )
+                f = getattr(self.lib, lib_func_name)
                 f.restype = func.restype
                 f.argtypes = func.argtypes
-                _funcs[func.name] = f
+                _funcs[func.name] = f  # Store with original nccl name as key
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
 
