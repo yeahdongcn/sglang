@@ -275,7 +275,7 @@ class NCCLLibrary:
     def __init__(self, so_file: str | None = None):
 
         so_file = so_file or find_nccl_library()
-        self._is_mccl = "mccl" in so_file
+        self._is_mccl = "libmccl" in so_file
 
         try:
             if so_file not in NCCLLibrary.path_to_dict_mapping:
