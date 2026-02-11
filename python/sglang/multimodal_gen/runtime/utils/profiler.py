@@ -4,6 +4,7 @@ import os
 import torch
 
 from sglang.multimodal_gen.runtime.utils.logging_utils import CYAN, RESET, init_logger
+from sglang.multimodal_gen.runtime.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -42,6 +43,8 @@ class SGLDiffusionProfiler:
         activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
+        elif current_platform.is_musa():
+            activities.append(torch.profiler.ProfilerActivity.MUSA)
 
         common_torch_profiler_args = dict(
             activities=activities,

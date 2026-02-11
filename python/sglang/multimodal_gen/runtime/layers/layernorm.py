@@ -66,6 +66,9 @@ class RMSNorm(CustomOp):
             x, self.weight, bias=None, residual=residual, eps=self.variance_epsilon
         )
 
+    def forward_musa(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+        return F.rms_norm(x, (self.hidden_size, ),  self.weight.to(x.dtype), self.variance_epsilon)
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -223,6 +226,9 @@ class LayerNorm(CustomOp):
             eps=self.eps,
             is_rms_norm=False,
         ).view(x.shape)
+
+    def forward_musa(self, x:torch.Tensor):
+        return F.layer_norm(x, (self.hidden_size,), self.weight, self.bias, self. eps)
 
     def forward_cuda(
         self,
