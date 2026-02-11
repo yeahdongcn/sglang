@@ -29,6 +29,11 @@ class MulAdd(CustomOp):
             # b.shape: [batch_size, 1, inner_dim]
             return c + a * (k + b)
 
+    def forward_musa(
+        self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, k: int = 0
+    ):
+        return fuse_scale_shift_kernel(a, b, c, scale_constant=k)
+
     def forward_cuda(
         self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, k: int = 0
     ):
