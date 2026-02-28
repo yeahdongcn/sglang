@@ -69,7 +69,7 @@ For detailed ROCm system configuration and installation from source, see [AMD GP
 
 ## Platform-Specific: MUSA (Moore Threads GPUs)
 
-For Moore Threads GPUs (MTGPU) with the MUSA software stack:
+For Moore Threads GPUs (MTGPU) with the MUSA software stack, please follow the instructions below to install from source:
 
 ```bash
 # Clone the repository
@@ -92,4 +92,29 @@ Quick test:
 sglang generate --model-path black-forest-labs/FLUX.1-dev \
     --prompt "A logo With Bold Large text: SGL Diffusion" \
     --save-output
+```
+
+## Platform-Specific: Apple MPS
+
+For Apple MPS, please follow the instructions below to install from source:
+
+```bash
+# Install ffmpeg
+brew install ffmpeg
+
+# Install miniconda (optional, for an isolated environment; uv is also a good alternative)
+brew install --cask miniconda
+
+# Clone the repository
+git clone https://github.com/sgl-project/sglang.git
+cd sglang
+
+# Create and activate a conda environment (optional, for an isolated environment)
+conda create -n sglang-diffusion python=3.11 -y
+conda activate sglang-diffusion
+
+# Install the Python packages
+pip install --upgrade pip
+rm -f python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml
+pip install -e "python[all_mps]"
 ```
