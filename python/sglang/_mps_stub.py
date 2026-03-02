@@ -108,6 +108,60 @@ def get_device_properties(device: Any = 0) -> _MPSDeviceProperties:  # noqa: ARG
 
 
 # ---------------------------------------------------------------------------
+# Memory tracking – MPS only provides *current* values; CUDA code expects
+# peak-tracking APIs like ``max_memory_allocated`` / ``max_memory_reserved``.
+# We maintain the peaks ourselves.
+# ---------------------------------------------------------------------------
+class _MPSMemoryTracker:
+    """Tracks peak memory values on top of ``torch.mps`` current-value APIs.
+
+    * ``memory_allocated`` → ``torch.mps.current_allocated_memory()``
+    * ``memory_reserved``  → ``torch.mps.driver_allocated_memory()``
+    * ``max_memory_*``     → high-water marks of the above
+    """
+
+    def __init__(self) -> None:
+        self._peak_allocated: int = 0
+        self._peak_reserved: int = 0
+
+    # -- current values (CUDA-compatible names) ----------------------------
+    def memory_allocated(self, device: Any = None) -> int:  # noqa: ARG002
+        import torch
+
+        val = torch.mps.current_allocated_memory()
+        if val > self._peak_allocated:
+            self._peak_allocated = val
+        return val
+
+    def memory_reserved(self, device: Any = None) -> int:  # noqa: ARG002
+        import torch
+
+        val = torch.mps.driver_allocated_memory()
+        if val > self._peak_reserved:
+            self._peak_reserved = val
+        return val
+
+    # -- peak values -------------------------------------------------------
+    def max_memory_allocated(self, device: Any = None) -> int:  # noqa: ARG002
+        # Refresh peak before returning
+        self.memory_allocated()
+        return self._peak_allocated
+
+    def max_memory_reserved(self, device: Any = None) -> int:  # noqa: ARG002
+        self.memory_reserved()
+        return self._peak_reserved
+
+    def reset_peak_memory_stats(self, device: Any = None) -> None:  # noqa: ARG002
+        import torch
+
+        self._peak_allocated = torch.mps.current_allocated_memory()
+        self._peak_reserved = torch.mps.driver_allocated_memory()
+
+
+_memory_tracker = _MPSMemoryTracker()
+
+
+# ---------------------------------------------------------------------------
 # install – monkey-patch torch.mps
 # ---------------------------------------------------------------------------
 _installed = False
@@ -129,6 +183,11 @@ def install() -> None:
         ("current_device", current_device),
         ("device_count", device_count),
         ("get_device_properties", get_device_properties),
+        ("reset_peak_memory_stats", _memory_tracker.reset_peak_memory_stats),
+        ("memory_allocated", _memory_tracker.memory_allocated),
+        ("memory_reserved", _memory_tracker.memory_reserved),
+        ("max_memory_allocated", _memory_tracker.max_memory_allocated),
+        ("max_memory_reserved", _memory_tracker.max_memory_reserved),
     ]:
         if not hasattr(mps, name):
             setattr(mps, name, obj)
