@@ -2064,7 +2064,9 @@ def get_device(device_id: Optional[int] = None) -> str:
         return "musa:{}".format(device_id)
 
     if is_mps():
-        return "mps"
+        if device_id is None:
+            return "mps"
+        return "mps:{}".format(device_id)
 
     raise RuntimeError("No accelerator (CUDA, XPU, HPU, NPU, MUSA, MPS) is available.")
 
