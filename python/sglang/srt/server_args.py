@@ -51,6 +51,7 @@ from sglang.srt.utils.common import (
     is_flashinfer_available,
     is_hip,
     is_hopper_with_cuda_12_3,
+    is_mps,
     is_no_spec_infer_or_topk_one,
     is_npu,
     is_remote_url,
@@ -1939,6 +1940,8 @@ class ServerArgs:
                 return "trtllm_mha"
             elif is_hip():
                 return "aiter"
+            elif is_mps():
+                return "torch_native"
             else:
                 return "flashinfer" if is_flashinfer_available() else "triton"
         else:
@@ -1952,6 +1955,8 @@ class ServerArgs:
                 # TODO current aiter only support head number 16 or 128 head number
                 if head_num == 128 or head_num == 16:
                     return "aiter"
+                elif is_mps():
+                    return "torch_native"
                 else:
                     return "triton"
             else:

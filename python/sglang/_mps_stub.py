@@ -9,6 +9,7 @@ just work.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,6 +49,45 @@ class Stream:
 
     def __exit__(self, *args: Any) -> None:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Event – a no-op placeholder (MPS has no user-visible events)
+# ---------------------------------------------------------------------------
+class Event:
+    """Minimal stand-in for ``torch.cuda.Event``."""
+
+    def __init__(self, enable_timing: bool = False) -> None:
+        pass
+
+    def record(self, stream: Any = None) -> None:
+        pass
+
+    def wait(self, stream: Any = None) -> None:
+        pass
+
+    def query(self) -> bool:
+        return True
+
+    def synchronize(self) -> None:
+        pass
+
+    def elapsed_time(self, end_event: Any) -> float:
+        return 0.0
+
+
+# Singleton stream instance for current_stream()
+_default_stream = Stream()
+
+
+def current_stream(device: Any = None) -> Stream:
+    """Return the default (and only) MPS stream."""
+    return _default_stream
+
+
+def stream(s: Any) -> Stream:
+    """Return a context manager that is a no-op on MPS."""
+    return s if s is not None else _default_stream
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +202,49 @@ _memory_tracker = _MPSMemoryTracker()
 
 
 # ---------------------------------------------------------------------------
+# non_blocking patch – MPS does not properly synchronise async H2D copies
+# ---------------------------------------------------------------------------
+def _patch_non_blocking() -> None:
+    """Force ``non_blocking=False`` for copies targeting the MPS device.
+
+    Unlike CUDA, MPS does not guarantee that a subsequent kernel on the same
+    "stream" will wait for an async host-to-device transfer to finish.  Reading
+    the tensor before the transfer completes yields uninitialised (garbage)
+    data.  Patching ``Tensor.to`` and ``Tensor.copy_`` centrally avoids having
+    to sprinkle ``non_blocking=not is_mps()`` at every call-site.
+    """
+    import torch
+
+    _original_to = torch.Tensor.to
+
+    @functools.wraps(_original_to)
+    def _patched_to(self, *args, **kwargs):
+        if kwargs.get("non_blocking"):
+            # Detect target device from positional or keyword args
+            device = None
+            if args and isinstance(args[0], (str, torch.device)):
+                device = torch.device(args[0]) if isinstance(args[0], str) else args[0]
+            elif "device" in kwargs:
+                d = kwargs["device"]
+                device = torch.device(d) if isinstance(d, str) else d
+            if device is not None and device.type == "mps":
+                kwargs = {**kwargs, "non_blocking": False}
+        return _original_to(self, *args, **kwargs)
+
+    torch.Tensor.to = _patched_to
+
+    _original_copy_ = torch.Tensor.copy_
+
+    @functools.wraps(_original_copy_)
+    def _patched_copy_(self, src, non_blocking=False):
+        if non_blocking and self.device.type == "mps":
+            non_blocking = False
+        return _original_copy_(self, src, non_blocking=non_blocking)
+
+    torch.Tensor.copy_ = _patched_copy_
+
+
+# ---------------------------------------------------------------------------
 # install – monkey-patch torch.mps
 # ---------------------------------------------------------------------------
 _installed = False
@@ -179,6 +262,9 @@ def install() -> None:
     # Only patch attributes that are actually missing
     for name, obj in [
         ("Stream", Stream),
+        ("Event", Event),
+        ("current_stream", current_stream),
+        ("stream", stream),
         ("set_device", set_device),
         ("current_device", current_device),
         ("device_count", device_count),
@@ -191,5 +277,8 @@ def install() -> None:
     ]:
         if not hasattr(mps, name):
             setattr(mps, name, obj)
+
+    # Patch non_blocking for MPS device transfers
+    _patch_non_blocking()
 
     _installed = True

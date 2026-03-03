@@ -11,7 +11,7 @@ class DeviceConfig:
     gpu_id: Optional[int]
 
     def __init__(self, device: str = "cuda", gpu_id: int = -1) -> None:
-        if device in ["cuda", "xpu", "hpu", "cpu", "npu", "musa"]:
+        if device in ["cuda", "xpu", "hpu", "cpu", "npu", "musa", "mps"]:
             self.device_type = device
         else:
             raise RuntimeError(f"Not supported device type: {device}")
