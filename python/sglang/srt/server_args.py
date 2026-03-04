@@ -1955,10 +1955,10 @@ class ServerArgs:
                 # TODO current aiter only support head number 16 or 128 head number
                 if head_num == 128 or head_num == 16:
                     return "aiter"
-                elif is_mps():
-                    return "torch_native"
                 else:
                     return "triton"
+            elif is_mps():
+                return "torch_native"
             else:
                 return "triton"
 
