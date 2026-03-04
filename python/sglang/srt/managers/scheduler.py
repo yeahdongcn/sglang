@@ -31,7 +31,6 @@ import torch
 import torch.distributed
 import zmq
 from torch.cuda import Stream as CudaStream
-from torch.cuda import StreamContext as CudaStreamContext
 from torch.distributed import barrier
 
 from sglang.srt.configs.model_config import ModelConfig
@@ -201,6 +200,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     get_int_env_var,
     get_zmq_socket,
+    is_mps,
     kill_itself_when_parent_died,
     numa_bind_to_node,
     point_to_point_pyobj,
@@ -216,6 +216,11 @@ from sglang.srt.utils.hf_transformers_utils import (
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+
+if is_mps():
+    CudaStreamContext = nullcontext
+else:
+    from torch.cuda import StreamContext as CudaStreamContext
 
 logger = logging.getLogger(__name__)
 
@@ -3204,8 +3209,6 @@ def run_scheduler_process(
         scheduler.schedule_stream = scheduler.device_module.Stream(priority=0)
         if scheduler.device == "cpu":
             scheduler.schedule_stream.synchronize = lambda: None  # No-op for CPU
-        elif scheduler.device == "mps":
-            CudaStreamContext = nullcontext  # MPS has no stream context
         with CudaStreamContext(scheduler.schedule_stream):
             dispatch_event_loop(scheduler)
 
