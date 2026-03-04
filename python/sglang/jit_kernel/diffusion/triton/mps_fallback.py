@@ -70,16 +70,27 @@ def fuse_scale_shift_kernel_native(
     block_c: int = 128,
 ):
     """Native fallback for fuse_scale_shift_kernel with scale_constant support."""
-    if scale.dim() == 4:
-        B, L, C = x.shape
-        num_frames = scale.shape[1]
-        frame_seqlen = L // num_frames
-        scale = (
-            scale.squeeze(2)
-            .unsqueeze(2)
-            .expand(-1, -1, frame_seqlen, -1)
-            .reshape(B, L, C)
-        )
+    B, L, C = x.shape
+
+    def _expand(t: torch.Tensor) -> torch.Tensor:
+        if t.dim() == 4:
+            # [B, F, 1, C] -> [B, L, C]
+            num_frames = t.shape[1]
+            frame_seqlen = L // num_frames
+            return (
+                t.squeeze(2)
+                .unsqueeze(2)
+                .expand(-1, -1, frame_seqlen, -1)
+                .reshape(B, L, C)
+            )
+        elif t.dim() == 2:
+            # [B, C] -> [B, 1, C]
+            return t.unsqueeze(1)
+        return t
+
+    scale = _expand(scale)
+    shift = _expand(shift)
+
     return x * (scale_constant + scale) + shift
 
 
