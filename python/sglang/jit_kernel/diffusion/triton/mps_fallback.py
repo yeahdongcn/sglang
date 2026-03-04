@@ -17,9 +17,7 @@ from torch import Tensor
 
 from sglang.srt.environ import envs
 
-# ---------------------------------------------------------------------------
 # MLX acceleration – opt-in via SGLANG_USE_MLX=1
-# ---------------------------------------------------------------------------
 _MLX_AVAILABLE = False
 try:
     import mlx.core as mx
@@ -61,11 +59,6 @@ def _mlx_to_torch(array: "mx.array", device: torch.device) -> torch.Tensor:
     if device.type == "mps":
         tensor = tensor.to(device)
     return tensor
-
-
-# ---------------------------------------------------------------------------
-# Scale-shift fallbacks (pure PyTorch – simple arithmetic, no MLX benefit)
-# ---------------------------------------------------------------------------
 
 
 def fuse_scale_shift_kernel_native(
@@ -111,14 +104,10 @@ def fuse_scale_shift_gate_select01_kernel_native(
     return y, gate
 
 
-# ---------------------------------------------------------------------------
-# Rotary embedding fallback (shared with NPU – same implementation)
-# ---------------------------------------------------------------------------
-
-
 def apply_rotary_embedding_native(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False
 ) -> torch.Tensor:
+    """Native fallback for rotary embedding (shared with NPU implementation)."""
     cos = cos.unsqueeze(-2).to(x.dtype)
     sin = sin.unsqueeze(-2).to(x.dtype)
     x1 = x[..., ::2]
@@ -126,11 +115,6 @@ def apply_rotary_embedding_native(
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
     return torch.stack((o1, o2), dim=-1).flatten(-2)
-
-
-# ---------------------------------------------------------------------------
-# Norm fallbacks (torch native, overridden by MLX below when enabled)
-# ---------------------------------------------------------------------------
 
 
 def norm_infer_native(
@@ -219,11 +203,9 @@ def rms_norm_fn_native(
     return y
 
 
-# ---------------------------------------------------------------------------
 # MLX-accelerated norm ops (1.4x–2.9x faster than torch native on MPS)
 # Uses mx.fast.rms_norm / mx.fast.layer_norm — single fused Metal kernels
 # instead of 7+ separate PyTorch MPS kernel launches.
-# ---------------------------------------------------------------------------
 
 if _USE_MLX:
 
@@ -290,7 +272,6 @@ if _USE_MLX:
         device = x.device
         orig_dtype = x.dtype
         x_flat = x.reshape(-1, x.shape[-1])
-        # Handle residual addition on torch side (stays on MPS)
         if residual is not None:
             residual = residual.reshape(-1, residual.shape[-1]).float()
             x_flat = x_flat.float() + residual
@@ -299,12 +280,10 @@ if _USE_MLX:
             )
         else:
             residual_out_val = None
-        # Prepare weight
         if weight is not None and zero_centered_weight:
             w = weight.float() + 1.0
         else:
             w = weight
-        # MLX fast RMS norm
         x_mx = _torch_to_mlx(x_flat)
         w_mx = _torch_to_mlx(w) if w is not None else mx.ones(x_mx.shape[-1])
         result_mx = mx.fast.rms_norm(x_mx, w_mx, eps)

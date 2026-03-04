@@ -69,7 +69,6 @@ class Event:
         return 0.0
 
 
-# Singleton stream instance for current_stream()
 _default_stream = Stream()
 
 
@@ -124,6 +123,7 @@ _cached_props: _MPSDeviceProperties | None = None
 
 
 def get_device_properties(device: Any = 0) -> _MPSDeviceProperties:  # noqa: ARG001
+    """Return the properties of the MPS device. Results are cached after first call."""
     global _cached_props
     if _cached_props is None:
         import psutil
@@ -163,7 +163,6 @@ class _MPSMemoryTracker:
         return val
 
     def max_memory_allocated(self, device: Any = None) -> int:  # noqa: ARG002
-        # Refresh peak before returning
         self.memory_allocated()
         return self._peak_allocated
 
@@ -252,7 +251,6 @@ def install() -> None:
         if not hasattr(mps, name):
             setattr(mps, name, obj)
 
-    # Patch non_blocking for MPS device transfers
     _patch_non_blocking()
 
     _installed = True

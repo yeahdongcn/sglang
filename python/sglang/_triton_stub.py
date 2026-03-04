@@ -46,7 +46,7 @@ class _MockModule(types.ModuleType):
         self.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=True)
 
     def __getattr__(self, name: str):
-        # Avoid infinite recursion on dunder lookups
+        """Handle attribute access by creating and returning a child _MockModule."""
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
         full = f"{self.__name__}.{name}"
@@ -75,9 +75,11 @@ class _MockModule(types.ModuleType):
         return _decorator
 
     def __instancecheck__(self, instance):
+        """Return False for all instance checks against the mock."""
         return False
 
     def __contains__(self, item):
+        """Return False for all membership checks."""
         return False
 
     def __iter__(self):
