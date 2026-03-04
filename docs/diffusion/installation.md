@@ -102,19 +102,19 @@ For Apple MPS, please follow the instructions below to install from source:
 # Install ffmpeg
 brew install ffmpeg
 
-# Install miniconda (optional, for an isolated environment; uv is also a good alternative)
-brew install --cask miniconda
+# Install uv
+brew brew install uv
 
 # Clone the repository
 git clone https://github.com/sgl-project/sglang.git
 cd sglang
 
-# Create and activate a conda environment (optional, for an isolated environment)
-conda create -n sglang-diffusion python=3.11 -y
-conda activate sglang-diffusion
+# Create and activate a virtual environment
+uv venv -p 3.11 sglang-diffusion
+source sglang-diffusion/bin/activate
 
 # Install the Python packages
-pip install --upgrade pip
+uv pip install --upgrade pip
 rm -f python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml
-pip install -e "python[all_mps]"
+uv pip install -e "python[all_mps]"
 ```
