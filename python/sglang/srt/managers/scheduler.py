@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Deque, List, Optional, Tuple, Union
@@ -3203,6 +3204,8 @@ def run_scheduler_process(
         scheduler.schedule_stream = scheduler.device_module.Stream(priority=0)
         if scheduler.device == "cpu":
             scheduler.schedule_stream.synchronize = lambda: None  # No-op for CPU
+        elif scheduler.device == "mps":
+            CudaStreamContext = nullcontext  # MPS has no stream context
         with CudaStreamContext(scheduler.schedule_stream):
             dispatch_event_loop(scheduler)
 
