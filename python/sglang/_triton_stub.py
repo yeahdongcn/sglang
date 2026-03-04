@@ -45,8 +45,6 @@ class _MockModule(types.ModuleType):
 
         self.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=True)
 
-    # --- attribute access ---------------------------------------------------
-
     def __getattr__(self, name: str):
         # Avoid infinite recursion on dunder lookups
         if name.startswith("__") and name.endswith("__"):
@@ -65,8 +63,6 @@ class _MockModule(types.ModuleType):
         self._children[name] = child
         return child
 
-    # --- decorator / callable behaviour -------------------------------------
-
     def __call__(self, *args, **kwargs):
         # Direct decorator usage:  @triton.jit  (receives the function)
         if len(args) == 1 and callable(args[0]) and not kwargs:
@@ -78,12 +74,8 @@ class _MockModule(types.ModuleType):
 
         return _decorator
 
-    # --- make it behave as a type for isinstance / annotations ---------------
-
     def __instancecheck__(self, instance):
         return False
-
-    # --- container protocol (for ``"x" in triton.backends.backends``) --------
 
     def __contains__(self, item):
         return False
@@ -96,8 +88,6 @@ class _MockModule(types.ModuleType):
 
     def __bool__(self):
         return False
-
-    # --- repr for debugging --------------------------------------------------
 
     def __repr__(self):
         return f"<triton-stub {self.__name__!r}>"
@@ -177,7 +167,6 @@ def install() -> None:
     # during the rest of install() (or later) is handled.
     sys.meta_path.insert(0, _TritonFinder())
 
-    # -- build the mock tree --------------------------------------------------
     triton = _make_mock("triton")
     triton.__version__ = "3.0.0"
     triton.cdiv = _cdiv

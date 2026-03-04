@@ -14,9 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
-# Stream – a no-op placeholder (MPS serialises everything on one stream)
-# ---------------------------------------------------------------------------
 class Stream:
     """Minimal stand-in for ``torch.cuda.Stream``.
 
@@ -27,7 +24,6 @@ class Stream:
     def __init__(self, device: Any = None, priority: int = 0) -> None:
         pass
 
-    # -- public API expected by the codebase ---------------------------------
     def synchronize(self) -> None:
         pass
 
@@ -51,9 +47,6 @@ class Stream:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Event – a no-op placeholder (MPS has no user-visible events)
-# ---------------------------------------------------------------------------
 class Event:
     """Minimal stand-in for ``torch.cuda.Event``."""
 
@@ -90,27 +83,21 @@ def stream(s: Any) -> Stream:
     return s if s is not None else _default_stream
 
 
-# ---------------------------------------------------------------------------
-# set_device – MPS has exactly one device; this is a no-op.
-# ---------------------------------------------------------------------------
 def set_device(device: Any) -> None:  # noqa: ARG001
+    """Set the current device. This is a no-op for MPS as it has exactly one device."""
     pass
 
 
-# ---------------------------------------------------------------------------
-# current_device / device_count – trivial for single-device MPS
-# ---------------------------------------------------------------------------
 def current_device() -> int:
+    """Return the index of the current MPS device (always 0)."""
     return 0
 
 
 def device_count() -> int:
+    """Return the number of available MPS devices (always 1)."""
     return 1
 
 
-# ---------------------------------------------------------------------------
-# get_device_properties – returns a lightweight dataclass
-# ---------------------------------------------------------------------------
 @dataclass
 class _MPSDeviceProperties:
     """Mimics the object returned by ``torch.cuda.get_device_properties``."""
@@ -147,11 +134,6 @@ def get_device_properties(device: Any = 0) -> _MPSDeviceProperties:  # noqa: ARG
     return _cached_props
 
 
-# ---------------------------------------------------------------------------
-# Memory tracking – MPS only provides *current* values; CUDA code expects
-# peak-tracking APIs like ``max_memory_allocated`` / ``max_memory_reserved``.
-# We maintain the peaks ourselves.
-# ---------------------------------------------------------------------------
 class _MPSMemoryTracker:
     """Tracks peak memory values on top of ``torch.mps`` current-value APIs.
 
@@ -164,7 +146,6 @@ class _MPSMemoryTracker:
         self._peak_allocated: int = 0
         self._peak_reserved: int = 0
 
-    # -- current values (CUDA-compatible names) ----------------------------
     def memory_allocated(self, device: Any = None) -> int:  # noqa: ARG002
         import torch
 
@@ -181,7 +162,6 @@ class _MPSMemoryTracker:
             self._peak_reserved = val
         return val
 
-    # -- peak values -------------------------------------------------------
     def max_memory_allocated(self, device: Any = None) -> int:  # noqa: ARG002
         # Refresh peak before returning
         self.memory_allocated()
@@ -201,9 +181,6 @@ class _MPSMemoryTracker:
 _memory_tracker = _MPSMemoryTracker()
 
 
-# ---------------------------------------------------------------------------
-# non_blocking patch – MPS does not properly synchronise async H2D copies
-# ---------------------------------------------------------------------------
 def _patch_non_blocking() -> None:
     """Force ``non_blocking=False`` for copies targeting the MPS device.
 
@@ -244,9 +221,6 @@ def _patch_non_blocking() -> None:
     torch.Tensor.copy_ = _patched_copy_
 
 
-# ---------------------------------------------------------------------------
-# install – monkey-patch torch.mps
-# ---------------------------------------------------------------------------
 _installed = False
 
 
