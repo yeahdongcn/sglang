@@ -103,7 +103,7 @@ For Apple MPS, please follow the instructions below to install from source:
 brew install ffmpeg
 
 # Install uv
-brew brew install uv
+brew install uv
 
 # Clone the repository
 git clone https://github.com/sgl-project/sglang.git
