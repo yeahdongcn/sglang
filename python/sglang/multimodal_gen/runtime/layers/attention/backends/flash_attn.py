@@ -14,16 +14,23 @@ from sglang.multimodal_gen.runtime.platforms import (
 )
 
 try:
-    from sgl_kernel.flash_attn import flash_attn_varlen_func
+    if current_platform.is_musa():
+        from flash_attn import flash_attn_varlen_func
 
-    from sglang.jit_kernel.flash_attention_v4 import (
-        flash_attn_varlen_func as flash_attn_varlen_func_fa4,
-    )
+        def flash_attn_func(*args, ver: int = 3, **kwargs):
+            return flash_attn_varlen_func(*args, **kwargs)
 
-    def flash_attn_func(*args, ver: int = 3, **kwargs):
-        if ver == 4:
-            return flash_attn_varlen_func_fa4(*args, **kwargs)
-        return flash_attn_varlen_func(*args, **kwargs)
+    else:
+        from sgl_kernel.flash_attn import flash_attn_varlen_func
+
+        from sglang.jit_kernel.flash_attention_v4 import (
+            flash_attn_varlen_func as flash_attn_varlen_func_fa4,
+        )
+
+        def flash_attn_func(*args, ver: int = 3, **kwargs):
+            if ver == 4:
+                return flash_attn_varlen_func_fa4(*args, **kwargs)
+            return flash_attn_varlen_func(*args, **kwargs)
 
 except ImportError as e:
     raise e
