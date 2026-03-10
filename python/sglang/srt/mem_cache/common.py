@@ -129,10 +129,8 @@ def get_last_loc(
     req_pool_indices_tensor: torch.Tensor,
     prefix_lens_tensor: torch.Tensor,
 ) -> torch.Tensor:
-    if (
-        get_global_server_args().attention_backend != "ascend"
-        and get_global_server_args().attention_backend != "torch_native"
-    ):
+    backend = get_global_server_args().attention_backend
+    if backend not in ["ascend", "torch_native", "mlx"]:
         impl = get_last_loc_triton
     else:
         impl = get_last_loc_torch

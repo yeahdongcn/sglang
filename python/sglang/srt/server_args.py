@@ -2101,6 +2101,13 @@ class ServerArgs:
             elif is_hip():
                 return "aiter"
             elif is_mps():
+                if envs.SGLANG_USE_MLX_ATTENTION.get():
+                    try:
+                        import mlx.core  # noqa
+
+                        return "mlx"
+                    except ImportError:
+                        pass
                 return "torch_native"
             else:
                 return "flashinfer" if is_flashinfer_available() else "triton"
@@ -2118,6 +2125,13 @@ class ServerArgs:
                 else:
                     return "triton"
             elif is_mps():
+                if envs.SGLANG_USE_MLX_ATTENTION.get():
+                    try:
+                        import mlx.core  # noqa
+
+                        return "mlx"
+                    except ImportError:
+                        pass
                 return "torch_native"
             else:
                 return "triton"
@@ -2145,6 +2159,12 @@ class ServerArgs:
         if self.attention_backend == "torch_native":
             logger.warning(
                 "Cuda graph is disabled because of using torch native attention backend"
+            )
+            self.disable_cuda_graph = True
+
+        if self.attention_backend == "mlx":
+            logger.warning(
+                "Cuda graph is disabled because of using MLX attention backend"
             )
             self.disable_cuda_graph = True
 
