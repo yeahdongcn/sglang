@@ -7,7 +7,7 @@ Only the final logits are bridged to PyTorch for sampling compatibility.
 import logging
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import torch
@@ -58,8 +58,23 @@ def _merge_kv_caches(
 
 
 def _extract_kv_cache(batch_caches: list, idx: int) -> list:
-    """Extract a single request's cache from batched caches."""
-    return [cache.extract(idx) for cache in batch_caches]
+    """Extract a single request's cache from batched caches.
+
+    Works with both BatchKVCache (has .extract) and plain KVCache
+    populated with batched data of shape (B, H, L, D).
+    """
+    extracted = []
+    for cache in batch_caches:
+        if hasattr(cache, "extract"):
+            extracted.append(cache.extract(idx))
+        else:
+            # Plain KVCache with batched data — slice along batch dim
+            new_cache = KVCache()
+            new_cache.keys = mx.contiguous(cache.keys[idx : idx + 1])
+            new_cache.values = mx.contiguous(cache.values[idx : idx + 1])
+            new_cache.offset = cache.offset
+            extracted.append(new_cache)
+    return extracted
 
 
 class MlxModelRunner:
@@ -155,6 +170,66 @@ class MlxModelRunner:
 
         return next_token
 
+    def prefill_batch(
+        self,
+        req_ids: List[str],
+        token_ids_list: List[List[int]],
+    ) -> List[int]:
+        """Run batched prefill for multiple requests in a single forward pass.
+
+        When all sequences have the same length, they are stacked into a single
+        batch tensor for one forward pass.  For variable-length sequences the
+        method falls back to serial prefill.
+
+        Args:
+            req_ids: List of request identifiers
+            token_ids_list: List of token ID sequences, one per request
+
+        Returns:
+            List of next token IDs (greedy sampled)
+        """
+        if len(req_ids) == 1:
+            return [self.prefill(req_ids[0], token_ids_list[0])]
+
+        # Check if all sequences have the same length (enables true batching)
+        lengths = [len(tids) for tids in token_ids_list]
+        if len(set(lengths)) != 1:
+            # Variable lengths – fall back to serial prefill
+            return [
+                self.prefill(rid, tids) for rid, tids in zip(req_ids, token_ids_list)
+            ]
+
+        # All same length – use a single set of fresh caches;
+        # they'll be populated with shape (batch_size, ...) on the first forward pass
+        batch_cache = make_prompt_cache(self.model)
+
+        # Stack into (batch_size, seq_len)
+        batched_input = mx.array(
+            [list(tids) for tids in token_ids_list], dtype=mx.int32
+        )
+
+        # Single forward pass
+        model_output = self.model(batched_input, cache=batch_cache)
+        logits = self._extract_logits(model_output)
+
+        last_logits = logits[:, -1, :]
+        next_tokens_mlx = mx.argmax(last_logits, axis=-1)
+
+        # Evaluate everything together
+        mx.eval(next_tokens_mlx, *[c.state for c in batch_cache])
+        next_tokens = next_tokens_mlx.tolist()
+
+        # Extract individual caches and store per-request state
+        for i, req_id in enumerate(req_ids):
+            individual_cache = _extract_kv_cache(batch_cache, i)
+            self._request_states[req_id] = MlxRequestState(
+                token_ids=list(token_ids_list[i]) + [next_tokens[i]],
+                cache=individual_cache,
+                generated_tokens=1,
+            )
+
+        return next_tokens
+
     def decode_batch(
         self,
         req_ids: List[str],
@@ -234,7 +309,7 @@ class MlxModelRunner:
         req_id: str,
         token_ids: List[int],
         cache: Optional[list] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, list]:
         """Run forward pass and return logits as a PyTorch tensor.
 
         This is useful for compatibility with sglang's sampling pipeline.

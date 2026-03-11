@@ -262,19 +262,40 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
 
     model_config = ModelConfig.from_server_args(server_args)
-    model_runner = ModelRunner(
-        model_config=model_config,
-        mem_fraction_static=server_args.mem_fraction_static,
-        gpu_id=gpu_id,
-        tp_rank=tp_rank,
-        tp_size=server_args.tp_size,
-        moe_ep_rank=moe_ep_rank,
-        moe_ep_size=server_args.ep_size,
-        pp_rank=0,
-        pp_size=1,
-        nccl_port=port_args.nccl_port,
-        server_args=server_args,
-    )
+
+    use_mlx = envs.SGLANG_USE_MLX.get()
+    if use_mlx:
+        from sglang.srt.hardware_backend.mlx.model_runner_stub import (
+            MlxModelRunnerStub,
+        )
+
+        model_runner = MlxModelRunnerStub(
+            model_config=model_config,
+            mem_fraction_static=server_args.mem_fraction_static,
+            gpu_id=gpu_id,
+            tp_rank=tp_rank,
+            tp_size=server_args.tp_size,
+            moe_ep_rank=moe_ep_rank,
+            moe_ep_size=server_args.ep_size,
+            pp_rank=0,
+            pp_size=1,
+            nccl_port=port_args.nccl_port,
+            server_args=server_args,
+        )
+    else:
+        model_runner = ModelRunner(
+            model_config=model_config,
+            mem_fraction_static=server_args.mem_fraction_static,
+            gpu_id=gpu_id,
+            tp_rank=tp_rank,
+            tp_size=server_args.tp_size,
+            moe_ep_rank=moe_ep_rank,
+            moe_ep_size=server_args.ep_size,
+            pp_rank=0,
+            pp_size=1,
+            nccl_port=port_args.nccl_port,
+            server_args=server_args,
+        )
     rank_print(f"max_total_num_tokens={model_runner.max_total_num_tokens}")
     tokenizer = get_tokenizer(
         server_args.tokenizer_path,
@@ -284,15 +305,8 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     if server_args.tp_size > 1:
         dist.barrier()
 
-    if envs.SGLANG_USE_MLX.get():
-        from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner
-
-        rank_print("Initializing MlxModelRunner for end-to-end MLX inference")
-        mlx_runner = MlxModelRunner(
-            model_path=server_args.model_path,
-            trust_remote_code=server_args.trust_remote_code,
-        )
-        model_runner = _MlxBenchRunner(mlx_runner)
+    if use_mlx:
+        model_runner = _MlxBenchRunner(model_runner, server_args)
     else:
         model_runner = _BenchRunner(model_runner)
 
@@ -475,19 +489,22 @@ class _BenchRunner:
 class _MlxBenchRunner:
     """Wraps MlxModelRunner for the MLX benchmark path."""
 
-    def __init__(self, mlx_runner):
-        self.mlx_runner = mlx_runner
+    def __init__(self, model_runner, server_args):
+        from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner
+
+        self.mlx_runner = MlxModelRunner(
+            model_path=server_args.model_path,
+            trust_remote_code=server_args.trust_remote_code,
+        )
+        self.torch_runner_stub = model_runner
 
     def clear(self):
         self.mlx_runner.clear()
 
     def extend(self, reqs):
-        next_token_ids = []
-        for req in reqs:
-            token_ids = [int(t) for t in req.fill_ids]
-            next_token = self.mlx_runner.prefill(str(req.rid), token_ids)
-            next_token_ids.append(next_token)
         req_ids = [str(req.rid) for req in reqs]
+        token_ids_list = [[int(t) for t in req.fill_ids] for req in reqs]
+        next_token_ids = self.mlx_runner.prefill_batch(req_ids, token_ids_list)
         return torch.tensor(next_token_ids), None, req_ids
 
     def decode(self, next_token_ids, req_ids):
@@ -503,7 +520,7 @@ class _MlxBenchRunner:
         pass
 
     def max_batch_size(self, input_len, output_len):
-        return float("inf")
+        return self.torch_runner_stub.max_total_num_tokens // (input_len + output_len)
 
 
 def _read_prompts_from_file(prompt_file, rank_print):

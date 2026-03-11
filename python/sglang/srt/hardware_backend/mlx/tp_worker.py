@@ -2,6 +2,12 @@
 
 Overrides the standard TpModelWorker to route forward passes through
 the native MLX model runner, avoiding PyTorch MPS entirely for inference.
+
+PyTorch model weights are never loaded.  A lightweight ModelRunner stub
+(MlxModelRunnerStub) provides only the minimal bookkeeping structures
+(req_to_token_pool, token_to_kv_pool_allocator with a zero-memory
+dummy KV cache) that the SGLang scheduler expects.  The actual KV cache
+is managed internally by the MLX model runner.
 """
 
 import logging
@@ -20,24 +26,49 @@ logger = logging.getLogger(__name__)
 class MlxTpModelWorker(TpModelWorker):
     """A tensor parallel model worker that routes inference through MLX.
 
-    Inherits from TpModelWorker to reuse the standard PyTorch model runner
-    for infrastructure (KV cache allocation, memory pools, etc.), but
-    overrides the forward pass to use the native MLX model runner.
+    Inherits from TpModelWorker for scheduler integration, but replaces
+    the standard ModelRunner with MlxModelRunnerStub (no PyTorch weights,
+    zero-memory KV cache) and delegates all forward passes to a native
+    MlxModelRunner.
     """
 
-    def __init__(self, **kwargs):
-        # Initialize the standard TpModelWorker (loads PyTorch model, sets up KV pools, etc.)
-        super().__init__(**kwargs)
-
-        # Initialize the MLX model runner alongside the PyTorch one
+    def _init_model_runner(self):
+        """Override to use a lightweight ModelRunner that skips weight loading."""
         from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner
+        from sglang.srt.hardware_backend.mlx.model_runner_stub import (
+            MlxModelRunnerStub,
+        )
 
+        self._model_runner = MlxModelRunnerStub(
+            model_config=self.model_config,
+            mem_fraction_static=self.server_args.mem_fraction_static,
+            gpu_id=self.gpu_id,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            moe_ep_rank=self.moe_ep_rank,
+            moe_ep_size=self.ep_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
+            nccl_port=self.nccl_port,
+            dp_rank=self.dp_rank,
+            server_args=self.server_args,
+            is_draft_worker=self.is_draft_worker,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            memory_pool_config=self.memory_pool_config,
+        )
+
+        # Initialize the MLX model runner (loads weights via MLX, not PyTorch)
         logger.info("Initializing MlxModelRunner for end-to-end MLX inference")
         self._mlx_runner = MlxModelRunner(
             model_path=self.server_args.model_path,
             trust_remote_code=self.server_args.trust_remote_code,
         )
         self._mlx_active_rids: set[str] = set()
+
+    def get_pad_input_ids_func(self):
+        """Override since the stub ModelRunner has no real model."""
+        return None
 
     def forward_batch_generation(
         self,
