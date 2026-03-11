@@ -49,7 +49,6 @@ def _merge_kv_caches(
         if isinstance(layer_caches[0], KVCache):
             batch_cache = BatchKVCache.merge(layer_caches)
         elif isinstance(layer_caches[0], RotatingKVCache):
-
             batch_cache = BatchRotatingKVCache.merge(layer_caches)
         else:
             raise TypeError(f"Unsupported cache type: {type(layer_caches[0]).__name__}")
