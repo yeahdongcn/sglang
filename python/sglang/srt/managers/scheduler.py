@@ -542,9 +542,9 @@ class Scheduler(
         self.require_mlp_sync = require_mlp_sync(self.server_args)
 
     def init_tp_model_worker(self):
-        from sglang.srt.managers.tp_worker import TpModelWorker
+        from sglang.srt.environ import envs
 
-        self.tp_worker = TpModelWorker(
+        worker_kwargs = dict(
             server_args=self.server_args,
             gpu_id=self.gpu_id,
             tp_rank=self.tp_rank,
@@ -555,6 +555,15 @@ class Scheduler(
             dp_rank=self.dp_rank,
             nccl_port=self.nccl_port,
         )
+
+        if envs.SGLANG_USE_MLX.get():
+            from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
+
+            self.tp_worker = MlxTpModelWorker(**worker_kwargs)
+        else:
+            from sglang.srt.managers.tp_worker import TpModelWorker
+
+            self.tp_worker = TpModelWorker(**worker_kwargs)
 
     def maybe_init_draft_worker(self):
         if self.spec_algorithm.is_none():
