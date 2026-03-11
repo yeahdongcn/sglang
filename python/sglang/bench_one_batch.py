@@ -262,40 +262,28 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
 
     model_config = ModelConfig.from_server_args(server_args)
-
+    runner_kwargs = dict(
+        model_config=model_config,
+        mem_fraction_static=server_args.mem_fraction_static,
+        gpu_id=gpu_id,
+        tp_rank=tp_rank,
+        tp_size=server_args.tp_size,
+        moe_ep_rank=moe_ep_rank,
+        moe_ep_size=server_args.ep_size,
+        pp_rank=0,
+        pp_size=1,
+        nccl_port=port_args.nccl_port,
+        server_args=server_args,
+    )
     use_mlx = envs.SGLANG_USE_MLX.get()
     if use_mlx:
         from sglang.srt.hardware_backend.mlx.model_runner_stub import (
             MlxModelRunnerStub,
         )
 
-        model_runner = MlxModelRunnerStub(
-            model_config=model_config,
-            mem_fraction_static=server_args.mem_fraction_static,
-            gpu_id=gpu_id,
-            tp_rank=tp_rank,
-            tp_size=server_args.tp_size,
-            moe_ep_rank=moe_ep_rank,
-            moe_ep_size=server_args.ep_size,
-            pp_rank=0,
-            pp_size=1,
-            nccl_port=port_args.nccl_port,
-            server_args=server_args,
-        )
+        model_runner = MlxModelRunnerStub(**runner_kwargs)
     else:
-        model_runner = ModelRunner(
-            model_config=model_config,
-            mem_fraction_static=server_args.mem_fraction_static,
-            gpu_id=gpu_id,
-            tp_rank=tp_rank,
-            tp_size=server_args.tp_size,
-            moe_ep_rank=moe_ep_rank,
-            moe_ep_size=server_args.ep_size,
-            pp_rank=0,
-            pp_size=1,
-            nccl_port=port_args.nccl_port,
-            server_args=server_args,
-        )
+        model_runner = ModelRunner(**runner_kwargs)
     rank_print(f"max_total_num_tokens={model_runner.max_total_num_tokens}")
     tokenizer = get_tokenizer(
         server_args.tokenizer_path,
