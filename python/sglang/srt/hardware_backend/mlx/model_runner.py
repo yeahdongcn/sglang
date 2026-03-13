@@ -1,16 +1,13 @@
 """End-to-end MLX model runner for Apple Silicon.
 
 Runs the entire model within MLX, bypassing PyTorch MPS entirely.
-Only the final logits are bridged to PyTorch for sampling compatibility.
 """
 
 import logging
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
-import torch
 from mlx_lm import load as mlx_lm_load
 from mlx_lm.models.cache import (
     BatchKVCache,
@@ -20,8 +17,6 @@ from mlx_lm.models.cache import (
     make_prompt_cache,
 )
 
-from sglang.srt.utils.tensor_bridge import mlx_to_torch
-
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +24,7 @@ logger = logging.getLogger(__name__)
 class MlxRequestState:
     """Per-request state for MLX inference."""
 
-    token_ids: List[int]
+    token_ids: list[int]
     cache: list  # List of KVCache per layer
     generated_tokens: int = 0
 
@@ -81,8 +76,7 @@ class MlxModelRunner:
     """Model runner that executes the entire model in MLX.
 
     This avoids the MPS<->MLX tensor bridge overhead by keeping all
-    computation within MLX. Only the final logits are bridged to PyTorch
-    for sampling.
+    computation within MLX.
     """
 
     def __init__(
@@ -93,7 +87,6 @@ class MlxModelRunner:
         self.model_path = model_path
         self.trust_remote_code = trust_remote_code
         self.model = None
-        self.tokenizer = None
         self._request_states: dict[str, MlxRequestState] = {}
 
         self._load_model()
@@ -110,7 +103,7 @@ class MlxModelRunner:
         logger.info(f"Loading MLX model: {self.model_path}")
         start_time = time.time()
 
-        self.model, self.tokenizer = mlx_lm_load(
+        self.model, _ = mlx_lm_load(
             self.model_path,
             tokenizer_config={"trust_remote_code": self.trust_remote_code},
         )
@@ -121,7 +114,7 @@ class MlxModelRunner:
     def prefill(
         self,
         req_id: str,
-        token_ids: List[int],
+        token_ids: list[int],
     ) -> int:
         """Run prefill for a single request.
 
@@ -172,9 +165,9 @@ class MlxModelRunner:
 
     def prefill_batch(
         self,
-        req_ids: List[str],
-        token_ids_list: List[List[int]],
-    ) -> List[int]:
+        req_ids: list[str],
+        token_ids_list: list[list[int]],
+    ) -> list[int]:
         """Run batched prefill for multiple requests in a single forward pass.
 
         When all sequences have the same length, they are stacked into a single
@@ -232,8 +225,8 @@ class MlxModelRunner:
 
     def decode_batch(
         self,
-        req_ids: List[str],
-    ) -> List[int]:
+        req_ids: list[str],
+    ) -> list[int]:
         """Run batched decode for multiple requests.
 
         Args:
@@ -265,7 +258,7 @@ class MlxModelRunner:
         last_logits = logits[:, -1, :]
         next_token_mlx = mx.argmax(last_logits, axis=-1)
 
-        mx.eval(next_token_mlx)
+        mx.eval(next_token_mlx, *[c.state for c in state.cache])
         next_token = int(next_token_mlx.item())
 
         state.token_ids.append(next_token)
@@ -275,7 +268,7 @@ class MlxModelRunner:
 
     def _batched_decode(
         self, decode_reqs: list[tuple[str, MlxRequestState]]
-    ) -> List[int]:
+    ) -> list[int]:
         """Run a single batched forward pass for multiple decode requests."""
         last_tokens = [state.token_ids[-1] for _, state in decode_reqs]
 
@@ -293,41 +286,16 @@ class MlxModelRunner:
         next_token_logits = logits[:, -1, :]
         next_tokens_mlx = mx.argmax(next_token_logits, axis=-1)
 
-        mx.eval(next_tokens_mlx)
+        mx.eval(next_tokens_mlx, *[c.state for c in batch_cache])
         next_tokens = next_tokens_mlx.tolist()
 
         # Extract updated caches back to individual requests
-        for i, (req_id, state) in enumerate(decode_reqs):
+        for i, (_, state) in enumerate(decode_reqs):
             state.cache = _extract_kv_cache(batch_cache, i)
             state.token_ids.append(next_tokens[i])
             state.generated_tokens += 1
 
         return next_tokens
-
-    def get_logits(
-        self,
-        req_id: str,
-        token_ids: List[int],
-        cache: Optional[list] = None,
-    ) -> Tuple[torch.Tensor, list]:
-        """Run forward pass and return logits as a PyTorch tensor.
-
-        This is useful for compatibility with sglang's sampling pipeline.
-        """
-        if cache is None:
-            cache = make_prompt_cache(self.model)
-
-        input_ids = mx.array([token_ids], dtype=mx.int32)
-        model_output = self.model(input_ids, cache=cache)
-
-        logits = self._extract_logits(model_output)
-
-        last_logits = logits[:, -1, :]
-        mx.eval(last_logits, *[c.state for c in cache])
-
-        # Bridge only the final logits to PyTorch
-        logits_torch = mlx_to_torch(last_logits.astype(mx.float32), device="cpu")
-        return logits_torch, cache
 
     def remove_request(self, req_id: str):
         """Clean up state for a completed request."""

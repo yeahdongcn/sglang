@@ -220,13 +220,12 @@ if _USE_MLX:
         x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
     ) -> torch.Tensor:
         """MLX-accelerated triton_one_pass_rms_norm."""
-        shape = x.shape
         device = x.device
         orig_dtype = x.dtype
-        x_mx = torch_to_mlx(x.reshape(-1, x.shape[-1]))
+        x_mx = torch_to_mlx(x)
         w_mx = torch_to_mlx(w)
         result_mx = mx.fast.rms_norm(x_mx, w_mx, eps)
-        return mlx_to_torch(result_mx, device).to(orig_dtype).view(shape)
+        return mlx_to_torch(result_mx, device).to(orig_dtype)
 
     def rms_norm_fn_native(  # noqa: F811
         x,
@@ -248,30 +247,25 @@ if _USE_MLX:
         residual_out=None,
     ):
         """MLX-accelerated rms_norm_fn (inference only, no dropout/x1 support)."""
-        x_shape_og = x.shape
         device = x.device
         orig_dtype = x.dtype
-        x_flat = x.reshape(-1, x.shape[-1])
         if residual is not None:
-            residual = residual.reshape(-1, residual.shape[-1]).float()
-            x_flat = x_flat.float() + residual
-            residual_out_val = x_flat.to(
-                torch.float32 if residual_in_fp32 else orig_dtype
-            )
+            x = x.float() + residual.float()
+            residual_out_val = x.to(torch.float32 if residual_in_fp32 else orig_dtype)
         else:
             residual_out_val = None
         if weight is not None and zero_centered_weight:
             w = weight.float() + 1.0
         else:
             w = weight
-        x_mx = torch_to_mlx(x_flat)
+        x_mx = torch_to_mlx(x)
         w_mx = torch_to_mlx(w) if w is not None else mx.ones(x_mx.shape[-1])
         result_mx = mx.fast.rms_norm(x_mx, w_mx, eps)
         x_hat = mlx_to_torch(result_mx, device)
         if bias is not None:
             x_hat = x_hat + bias.to(x_hat.device, x_hat.dtype)
         final_dtype = out_dtype if out_dtype is not None else orig_dtype
-        y = x_hat.to(final_dtype).reshape(x_shape_og)
+        y = x_hat.to(final_dtype)
         if residual is not None and residual_out_val is not None:
-            return y, residual_out_val.reshape(x_shape_og)
+            return y, residual_out_val
         return y

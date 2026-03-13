@@ -296,7 +296,7 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     if use_mlx:
         model_runner = _MlxBenchRunner(model_runner, server_args)
     else:
-        model_runner = _BenchRunner(model_runner)
+        model_runner = _TorchBenchRunner(model_runner)
 
     return model_runner, tokenizer
 
@@ -448,7 +448,7 @@ def _maybe_prepare_mlp_sync_batch(batch: ScheduleBatch, model_runner):
         )
 
 
-class _BenchRunner:
+class _TorchBenchRunner:
     """Wraps ModelRunner for the standard PyTorch benchmark path."""
 
     def __init__(self, model_runner):
@@ -484,7 +484,7 @@ class _MlxBenchRunner:
             model_path=server_args.model_path,
             trust_remote_code=server_args.trust_remote_code,
         )
-        self.torch_runner_stub = model_runner
+        self.fake_torch_runner = model_runner
 
     def clear(self):
         self.mlx_runner.clear()
@@ -508,7 +508,7 @@ class _MlxBenchRunner:
         pass
 
     def max_batch_size(self, input_len, output_len):
-        return self.torch_runner_stub.max_total_num_tokens // (input_len + output_len)
+        return self.fake_torch_runner.max_total_num_tokens // (input_len + output_len)
 
 
 def _read_prompts_from_file(prompt_file, rank_print):
