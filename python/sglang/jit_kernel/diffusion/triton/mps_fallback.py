@@ -15,19 +15,12 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from sglang.srt.environ import envs
-from sglang.srt.utils.tensor_bridge import mlx_to_torch, torch_to_mlx
+from sglang.srt.utils.tensor_bridge import mlx_to_torch, torch_to_mlx, use_mlx
 
-# MLX acceleration – opt-in via SGLANG_USE_MLX=1
-_MLX_AVAILABLE = False
-try:
+_use_mlx = use_mlx()
+
+if _use_mlx:
     import mlx.core as mx
-
-    _MLX_AVAILABLE = True
-except ImportError:
-    pass
-
-_USE_MLX = envs.SGLANG_USE_MLX.get() and _MLX_AVAILABLE
 
 
 def fuse_scale_shift_kernel_native(
@@ -187,7 +180,7 @@ def rms_norm_fn_native(
 # Uses mx.fast.rms_norm / mx.fast.layer_norm — single fused Metal kernels
 # instead of 7+ separate PyTorch MPS kernel launches.
 
-if _USE_MLX:
+if _use_mlx:
 
     def norm_infer_native(  # noqa: F811
         x: Tensor,

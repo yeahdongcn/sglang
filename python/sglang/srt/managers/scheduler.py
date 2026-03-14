@@ -217,6 +217,7 @@ from sglang.srt.utils.hf_transformers_utils import (
     get_tokenizer,
     get_tokenizer_from_processor,
 )
+from sglang.srt.utils.tensor_bridge import use_mlx
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
@@ -542,7 +543,6 @@ class Scheduler(
         self.require_mlp_sync = require_mlp_sync(self.server_args)
 
     def init_tp_model_worker(self):
-        from sglang.srt.environ import envs
 
         worker_kwargs = dict(
             server_args=self.server_args,
@@ -556,7 +556,7 @@ class Scheduler(
             nccl_port=self.nccl_port,
         )
 
-        if envs.SGLANG_USE_MLX.get():
+        if use_mlx():
             from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
 
             self.tp_worker = MlxTpModelWorker(**worker_kwargs)

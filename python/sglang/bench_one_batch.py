@@ -66,7 +66,6 @@ import torch.distributed as dist
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed.parallel_state import destroy_distributed_environment
 from sglang.srt.entrypoints.engine import _set_envs_and_config
-from sglang.srt.environ import envs
 from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
 from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
@@ -88,6 +87,7 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+from sglang.srt.utils.tensor_bridge import use_mlx
 
 
 def start_profile(profile_activities, profile_record_shapes=False, rank_print=print):
@@ -275,8 +275,9 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
         nccl_port=port_args.nccl_port,
         server_args=server_args,
     )
-    use_mlx = envs.SGLANG_USE_MLX.get()
-    if use_mlx:
+
+    _use_mlx = use_mlx()
+    if _use_mlx:
         from sglang.srt.hardware_backend.mlx.model_runner_stub import (
             MlxModelRunnerStub,
         )
@@ -293,7 +294,7 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     if server_args.tp_size > 1:
         dist.barrier()
 
-    if use_mlx:
+    if _use_mlx:
         model_runner = _MlxBenchRunner(model_runner, server_args)
     else:
         model_runner = _TorchBenchRunner(model_runner)
