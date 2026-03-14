@@ -5,71 +5,23 @@ Runs the entire model within MLX, bypassing PyTorch MPS entirely.
 
 import logging
 import time
-from dataclasses import dataclass
 
 import mlx.core as mx
 from mlx_lm import load as mlx_lm_load
-from mlx_lm.models.cache import (
-    BatchKVCache,
-    BatchRotatingKVCache,
-    KVCache,
-    RotatingKVCache,
-    make_prompt_cache,
+
+from sglang.srt.hardware_backend.mlx.kv_cache import (
+    BatchedDecodeContext,
+    ContiguousKVCache,
+    MlxRequestState,
+    OffsetCache,
+    clear_context,
+    extract_kv_cache,
+    get_num_layers,
+    patch_model_attention,
+    set_context,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class MlxRequestState:
-    """Per-request state for MLX inference."""
-
-    token_ids: list[int]
-    cache: list  # List of KVCache per layer
-    generated_tokens: int = 0
-
-
-def _merge_kv_caches(
-    caches_list: list[list],
-) -> list:
-    """Merge multiple per-request caches into batched caches."""
-    if not caches_list:
-        return []
-
-    num_layers = len(caches_list[0])
-    merged = []
-
-    for layer_idx in range(num_layers):
-        layer_caches = [caches[layer_idx] for caches in caches_list]
-        if isinstance(layer_caches[0], KVCache):
-            batch_cache = BatchKVCache.merge(layer_caches)
-        elif isinstance(layer_caches[0], RotatingKVCache):
-            batch_cache = BatchRotatingKVCache.merge(layer_caches)
-        else:
-            raise TypeError(f"Unsupported cache type: {type(layer_caches[0]).__name__}")
-        merged.append(batch_cache)
-
-    return merged
-
-
-def _extract_kv_cache(batch_caches: list, idx: int) -> list:
-    """Extract a single request's cache from batched caches.
-
-    Works with both BatchKVCache (has .extract) and plain KVCache
-    populated with batched data of shape (B, H, L, D).
-    """
-    extracted = []
-    for cache in batch_caches:
-        if hasattr(cache, "extract"):
-            extracted.append(cache.extract(idx))
-        else:
-            # Plain KVCache with batched data — slice along batch dim
-            new_cache = KVCache()
-            new_cache.keys = mx.contiguous(cache.keys[idx : idx + 1])
-            new_cache.values = mx.contiguous(cache.values[idx : idx + 1])
-            new_cache.offset = cache.offset
-            extracted.append(new_cache)
-    return extracted
 
 
 class MlxModelRunner:
@@ -90,6 +42,7 @@ class MlxModelRunner:
         self._request_states: dict[str, MlxRequestState] = {}
 
         self._load_model()
+        patch_model_attention(self.model)
 
     @staticmethod
     def _extract_logits(model_output):
@@ -132,7 +85,6 @@ class MlxModelRunner:
         """
         existing_state = self._request_states.get(req_id)
         if existing_state is not None:
-            # Continuation: reuse existing cache, feed only new tokens
             cached_input_len = (
                 len(existing_state.token_ids) - existing_state.generated_tokens
             )
@@ -140,7 +92,8 @@ class MlxModelRunner:
             cache = existing_state.cache
         else:
             new_tokens = token_ids
-            cache = make_prompt_cache(self.model)
+            num_layers = get_num_layers(self.model)
+            cache = [ContiguousKVCache() for _ in range(num_layers)]
 
         input_ids = mx.array([new_tokens], dtype=mx.int32)
         model_output = self.model(input_ids, cache=cache)
@@ -150,11 +103,9 @@ class MlxModelRunner:
         last_logits = logits[:, -1, :]
         next_token_mlx = mx.argmax(last_logits, axis=-1)
 
-        # Evaluate everything together
         mx.eval(next_token_mlx, *[c.state for c in cache])
         next_token = int(next_token_mlx.item())
 
-        # Store state for future decoding
         self._request_states[req_id] = MlxRequestState(
             token_ids=list(token_ids) + [next_token],
             cache=cache,
@@ -192,32 +143,27 @@ class MlxModelRunner:
                 self.prefill(rid, tids) for rid, tids in zip(req_ids, token_ids_list)
             ]
 
-        # All same length – use a single set of fresh caches;
-        # they'll be populated with shape (batch_size, ...) on the first forward pass
-        batch_cache = make_prompt_cache(self.model)
+        num_layers = get_num_layers(self.model)
+        batch_cache = [ContiguousKVCache() for _ in range(num_layers)]
 
-        # Stack into (batch_size, seq_len)
         batched_input = mx.array(
             [list(tids) for tids in token_ids_list], dtype=mx.int32
         )
 
-        # Single forward pass
         model_output = self.model(batched_input, cache=batch_cache)
         logits = self._extract_logits(model_output)
 
         last_logits = logits[:, -1, :]
         next_tokens_mlx = mx.argmax(last_logits, axis=-1)
 
-        # Evaluate everything together
         mx.eval(next_tokens_mlx, *[c.state for c in batch_cache])
         next_tokens = next_tokens_mlx.tolist()
 
-        # Extract individual caches and store per-request state
         for i, req_id in enumerate(req_ids):
-            individual_cache = _extract_kv_cache(batch_cache, i)
+            per_req_cache = extract_kv_cache(batch_cache, i)
             self._request_states[req_id] = MlxRequestState(
                 token_ids=list(token_ids_list[i]) + [next_tokens[i]],
-                cache=individual_cache,
+                cache=per_req_cache,
                 generated_tokens=1,
             )
 
@@ -227,7 +173,9 @@ class MlxModelRunner:
         self,
         req_ids: list[str],
     ) -> list[int]:
-        """Run batched decode for multiple requests.
+        """Run decode for one or more requests.
+
+        Uses the same SDPA wrapper path regardless of batch size.
 
         Args:
             req_ids: List of request IDs to decode
@@ -235,67 +183,51 @@ class MlxModelRunner:
         Returns:
             List of next token IDs
         """
-        if len(req_ids) == 1:
-            return [self._decode_single(req_ids[0])]
+        states = [self._request_states[rid] for rid in req_ids]
+        batch_size = len(states)
 
-        decode_reqs = []
-        for req_id in req_ids:
-            state = self._request_states[req_id]
-            decode_reqs.append((req_id, state))
+        num_layers = get_num_layers(self.model)
+        layer_caches = [
+            [state.cache[layer_idx] for state in states]
+            for layer_idx in range(num_layers)
+        ]
+        seq_lens = [state.cache[0].offset for state in states]
 
-        return self._batched_decode(decode_reqs)
+        ctx = BatchedDecodeContext(
+            batch_size=batch_size,
+            seq_lens=seq_lens,
+            layer_caches=layer_caches,
+        )
+        set_context(ctx)
 
-    def _decode_single(self, req_id: str) -> int:
-        """Decode a single token for one request."""
-        state = self._request_states[req_id]
-        last_token = state.token_ids[-1]
+        try:
+            max_offset = max(seq_lens)
+            shim_cache = [OffsetCache(offset=max_offset) for _ in range(num_layers)]
 
-        input_ids = mx.array([[last_token]], dtype=mx.int32)
-        model_output = self.model(input_ids, cache=state.cache)
+            last_tokens = [state.token_ids[-1] for state in states]
+            batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
 
-        logits = self._extract_logits(model_output)
+            model_output = self.model(batched_input, cache=shim_cache)
+            logits = self._extract_logits(model_output)
 
-        last_logits = logits[:, -1, :]
-        next_token_mlx = mx.argmax(last_logits, axis=-1)
+            next_token_logits = logits[:, -1, :]
+            next_tokens_mlx = mx.argmax(next_token_logits, axis=-1)
 
-        mx.eval(next_token_mlx, *[c.state for c in state.cache])
-        next_token = int(next_token_mlx.item())
+            eval_targets = [next_tokens_mlx]
+            for state in states:
+                for c in state.cache:
+                    eval_targets.extend([c.keys, c.values])
+            mx.eval(*eval_targets)
 
-        state.token_ids.append(next_token)
-        state.generated_tokens += 1
+            next_tokens = next_tokens_mlx.tolist()
 
-        return next_token
+            for i, state in enumerate(states):
+                state.token_ids.append(next_tokens[i])
+                state.generated_tokens += 1
 
-    def _batched_decode(
-        self, decode_reqs: list[tuple[str, MlxRequestState]]
-    ) -> list[int]:
-        """Run a single batched forward pass for multiple decode requests."""
-        last_tokens = [state.token_ids[-1] for _, state in decode_reqs]
-
-        # Merge individual KV caches into batched cache
-        caches_list = [state.cache for _, state in decode_reqs]
-        batch_cache = _merge_kv_caches(caches_list)
-
-        # Create batched input: shape (batch_size, 1)
-        batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
-
-        # Single forward pass
-        model_output = self.model(batched_input, cache=batch_cache)
-        logits = self._extract_logits(model_output)
-
-        next_token_logits = logits[:, -1, :]
-        next_tokens_mlx = mx.argmax(next_token_logits, axis=-1)
-
-        mx.eval(next_tokens_mlx, *[c.state for c in batch_cache])
-        next_tokens = next_tokens_mlx.tolist()
-
-        # Extract updated caches back to individual requests
-        for i, (_, state) in enumerate(decode_reqs):
-            state.cache = _extract_kv_cache(batch_cache, i)
-            state.token_ids.append(next_tokens[i])
-            state.generated_tokens += 1
-
-        return next_tokens
+            return next_tokens
+        finally:
+            clear_context()
 
     def remove_request(self, req_id: str):
         """Clean up state for a completed request."""
