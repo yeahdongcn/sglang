@@ -163,7 +163,7 @@ class DecodingStage(PipelineStage):
                 self.server_args.model_paths[self.component_name],
                 self.server_args,
                 component_name=self.component_name,
-                transformers_or_diffusers="diffusers",
+                transformers_or_diffusers=loader.expected_library,
             )
             if pipeline:
                 pipeline.add_module(self.component_name, self.vae)
