@@ -543,13 +543,16 @@ class MPSEnv(BaseEnv):
             import platform
 
             info["macOS Version"] = platform.mac_ver()[0]
+        except Exception:
+            info["macOS Version"] = "Not Available"
+        try:
             # platform.mac_ver()[2] is the machine arch, not the build number
             build = subprocess.check_output(
                 ["sw_vers", "-buildVersion"], text=True
             ).strip()
             info["macOS Build"] = build
         except Exception:
-            info["macOS Version"] = "Not Available"
+            info["macOS Build"] = "Not Available"
         return info
 
     def _get_chip_info(self):
@@ -607,19 +610,22 @@ class MPSEnv(BaseEnv):
                 ["sysctl", "-n", "hw.ncpu"], text=True
             ).strip()
             info["CPU Cores (Total)"] = total
-            try:
-                perf = subprocess.check_output(
-                    ["sysctl", "-n", "hw.perflevel0.logicalcpu"], text=True
-                ).strip()
-                eff = subprocess.check_output(
-                    ["sysctl", "-n", "hw.perflevel1.logicalcpu"], text=True
-                ).strip()
-                info["CPU Cores (Performance)"] = perf
-                info["CPU Cores (Efficiency)"] = eff
-            except Exception:
-                pass
         except Exception:
-            info["CPU Cores"] = "Not Available"
+            info["CPU Cores (Total)"] = "Not Available"
+        try:
+            perf = subprocess.check_output(
+                ["sysctl", "-n", "hw.perflevel0.logicalcpu"], text=True
+            ).strip()
+            info["CPU Cores (Performance)"] = perf
+        except Exception:
+            pass
+        try:
+            eff = subprocess.check_output(
+                ["sysctl", "-n", "hw.perflevel1.logicalcpu"], text=True
+            ).strip()
+            info["CPU Cores (Efficiency)"] = eff
+        except Exception:
+            pass
         return info
 
     def _get_gpu_cores(self):
