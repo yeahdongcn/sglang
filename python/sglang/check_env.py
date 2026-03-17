@@ -10,7 +10,7 @@ from collections import OrderedDict, defaultdict
 
 import torch
 
-from sglang.srt.utils import is_hip, is_musa, is_npu
+from sglang.srt.utils import is_hip, is_mps, is_musa, is_npu
 
 
 def is_cuda_v2():
@@ -513,6 +513,146 @@ class MUSAEnv(BaseEnv):
             return {}
 
 
+class MPSEnv(BaseEnv):
+    """Environment checker for Apple Silicon MPS"""
+
+    EXTRA_PACKAGE_LIST = [
+        "mlx",
+        "mlx-lm",
+        "mlx-metal",
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.package_list.extend(MPSEnv.EXTRA_PACKAGE_LIST)
+
+    def get_info(self):
+        mps_info = {"MPS available": torch.backends.mps.is_available()}
+        if mps_info["MPS available"]:
+            mps_info.update(self._get_macos_info())
+            mps_info.update(self._get_chip_info())
+            mps_info.update(self.get_device_info())
+            mps_info.update(self._get_memory_info())
+            mps_info.update(self._get_cpu_info())
+        return mps_info
+
+    def _get_macos_info(self):
+        """Get macOS version and build information."""
+        info = {}
+        try:
+            import platform
+
+            info["macOS Version"] = platform.mac_ver()[0]
+            # platform.mac_ver()[2] is the machine arch, not the build number
+            build = subprocess.check_output(
+                ["sw_vers", "-buildVersion"], text=True
+            ).strip()
+            info["macOS Build"] = build
+        except Exception:
+            info["macOS Version"] = "Not Available"
+        return info
+
+    def _get_chip_info(self):
+        """Get Apple Silicon chip information."""
+        info = {}
+        try:
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+            ).strip()
+            info["Apple Silicon"] = chip
+        except Exception:
+            info["Apple Silicon"] = "Not Available"
+        return info
+
+    def _get_metal_info(self):
+        """Get Metal API version and GPU family support."""
+        info = {}
+        try:
+            # Get Metal device info via system_profiler
+            sp_output = subprocess.check_output(
+                ["system_profiler", "SPDisplaysDataType"], text=True
+            )
+            for line in sp_output.splitlines():
+                line = line.strip()
+                if "Metal Support" in line or "Metal Family" in line:
+                    key, _, val = line.partition(":")
+                    info["Metal Support"] = val.strip()
+                    break
+            if "Metal Support" not in info:
+                info["Metal Support"] = "Not Available"
+        except Exception:
+            info["Metal Support"] = "Not Available"
+        return info
+
+    def _get_memory_info(self):
+        """Get unified memory information."""
+        info = {}
+        try:
+            mem_bytes = int(
+                subprocess.check_output(
+                    ["sysctl", "-n", "hw.memsize"], text=True
+                ).strip()
+            )
+            mem_gb = mem_bytes / (1024**3)
+            info["Unified Memory"] = f"{mem_gb:.1f} GB"
+        except Exception:
+            info["Unified Memory"] = "Not Available"
+        return info
+
+    def _get_cpu_info(self):
+        """Get CPU core counts (performance + efficiency)."""
+        info = {}
+        try:
+            total = subprocess.check_output(
+                ["sysctl", "-n", "hw.ncpu"], text=True
+            ).strip()
+            info["CPU Cores (Total)"] = total
+            try:
+                perf = subprocess.check_output(
+                    ["sysctl", "-n", "hw.perflevel0.logicalcpu"], text=True
+                ).strip()
+                eff = subprocess.check_output(
+                    ["sysctl", "-n", "hw.perflevel1.logicalcpu"], text=True
+                ).strip()
+                info["CPU Cores (Performance)"] = perf
+                info["CPU Cores (Efficiency)"] = eff
+            except Exception:
+                pass
+        except Exception:
+            info["CPU Cores"] = "Not Available"
+        return info
+
+    def _get_gpu_cores(self):
+        """Get GPU core count from system_profiler."""
+        info = {}
+        try:
+            sp_output = subprocess.check_output(
+                ["system_profiler", "SPDisplaysDataType"], text=True
+            )
+            for line in sp_output.splitlines():
+                line = line.strip()
+                if "Total Number of Cores" in line:
+                    _, _, val = line.partition(":")
+                    info["GPU Cores"] = val.strip()
+                    break
+            if "GPU Cores" not in info:
+                info["GPU Cores"] = "Not Available"
+        except Exception:
+            info["GPU Cores"] = "Not Available"
+        return info
+
+    def get_device_info(self):
+        """Get Metal GPU device information (Metal support level and GPU core count)."""
+        info = {}
+        info.update(self._get_metal_info())
+        info.update(self._get_gpu_cores())
+        return info
+
+    def get_topology(self):
+        """Not applicable for Apple Silicon (unified memory architecture)."""
+        return {}
+
+
 if __name__ == "__main__":
     if is_cuda_v2():
         env = GPUEnv()
@@ -522,4 +662,6 @@ if __name__ == "__main__":
         env = NPUEnv()
     elif is_musa():
         env = MUSAEnv()
+    elif is_mps():
+        env = MPSEnv()
     env.check_env()
