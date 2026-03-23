@@ -575,6 +575,7 @@ class Scheduler(
             nccl_port=self.nccl_port,
         )
 
+        # FIXME: move tp worker's init logic outside of the scheduler.
         if use_mlx():
             from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
 
