@@ -50,22 +50,24 @@ _MPS_SAFE_SIZE_BYTES = 1 << 30  # 1GB
 # to avoid a runtime error; when the target is CPU we can keep float64.
 # For now float64 is omitted from the mapping so it hits the ValueError
 # fallback in mlx_to_torch().
-MLX_TO_TORCH_DTYPE: dict[mx.Dtype, torch.dtype] = {
-    mx.float32: torch.float32,
-    mx.float16: torch.float16,
-    mx.bfloat16: torch.bfloat16,
-    mx.int32: torch.int32,
-    mx.int64: torch.int64,
-    mx.int16: torch.int16,
-    mx.int8: torch.int8,
-    mx.uint8: torch.uint8,
-    mx.bool_: torch.bool,
-}
+MLX_TO_TORCH_DTYPE = (
+    {
+        mx.float32: torch.float32,
+        mx.float16: torch.float16,
+        mx.bfloat16: torch.bfloat16,
+        mx.int32: torch.int32,
+        mx.int64: torch.int64,
+        mx.int16: torch.int16,
+        mx.int8: torch.int8,
+        mx.uint8: torch.uint8,
+        mx.bool_: torch.bool,
+    }
+    if _MLX_AVAILABLE
+    else {}
+)
 
 # PyTorch to MLX dtype mapping
-TORCH_TO_MLX_DTYPE: dict[torch.dtype, mx.Dtype] = {
-    v: k for k, v in MLX_TO_TORCH_DTYPE.items()
-}
+TORCH_TO_MLX_DTYPE = {v: k for k, v in MLX_TO_TORCH_DTYPE.items()}
 
 
 def get_torch_device() -> torch.device:
