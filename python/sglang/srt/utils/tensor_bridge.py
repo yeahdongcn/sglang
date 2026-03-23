@@ -5,6 +5,8 @@
 Provides zero-copy conversion when possible using Apple Silicon's unified memory.
 """
 
+from __future__ import annotations
+
 import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
