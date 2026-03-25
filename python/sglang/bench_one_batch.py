@@ -484,6 +484,8 @@ class _MlxBenchRunner:
         self.mlx_runner = MlxModelRunner(
             model_path=server_args.model_path,
             trust_remote_code=server_args.trust_remote_code,
+            disable_radix_cache=server_args.disable_radix_cache,
+            pool_size=8192,
         )
         self.fake_torch_runner = model_runner
 
