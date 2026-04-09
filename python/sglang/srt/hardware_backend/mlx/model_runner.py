@@ -312,7 +312,7 @@ class MlxModelRunner:
         cache_start: int,
         slot_ids: list[int],
     ) -> None:
-        """Copy KV from contiguous cache to pool at the given slot IDs."""
+        """Sync KV from contiguous cache to pool at the given slot IDs."""
         if not slot_ids or self._kv_pool is None:
             return
         num_layers = len(cache)
@@ -334,7 +334,7 @@ class MlxModelRunner:
         self._kv_pool.set_kv_all_layers(slot_ids_mx, k_all, v_all)
 
     def _sync_decode_kv_to_pool(self, req_id: str) -> None:
-        """Flush un-synced decode KV to pool before request removal."""
+        """Sync un-flushed decode KV for *req_id* to the shared pool."""
         if self._kv_pool is None or self._req_to_token_pool is None:
             return
         cache = self._req_caches.get(req_id)
@@ -356,17 +356,20 @@ class MlxModelRunner:
             .tolist()
         )
         self._sync_new_kv_to_pool(cache, synced_offset, slot_ids)
+        self._req_synced_offset[req_id] = current_offset
+
+    def flush_all_decode_kv(self) -> None:
+        """Sync all active requests' un-flushed decode KV to the pool."""
+        if self.disable_radix_cache or self._kv_pool is None:
+            return
+        for req_id in list(self._req_caches.keys()):
+            self._sync_decode_kv_to_pool(req_id)
 
     def decode_batch(
         self,
         req_ids: list[str],
     ) -> list[int]:
-        """Decode one token per request.
-
-        Each request writes directly into its pre-allocated
-        ContiguousKVCache via slice-assignment (no merge/extract cycle).
-        Pool sync is deferred to remove_request().
-        """
+        """Decode one token per request."""
         batch_size = len(req_ids)
         num_layers = self._num_layers
 
@@ -422,11 +425,7 @@ class MlxModelRunner:
         return req_id in self._req_caches
 
     def remove_request(self, req_id: str):
-        """Sync remaining decode KV to pool, then release request state.
-
-        Prefill KV is synced eagerly in prefill()/extend(); decode KV is
-        deferred here so that pool writes only happen once per request.
-        """
+        """Sync remaining decode KV to pool, then release request state."""
         if not self.disable_radix_cache:
             self._sync_decode_kv_to_pool(req_id)
 
