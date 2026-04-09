@@ -146,23 +146,23 @@ class MlxModelRunner:
             return explicit_size
         n_kv_heads, head_dim, dtype = self._get_attn_config()
         num_layers = self._num_layers
-        vm = psutil.virtual_memory()
-        metal_limit = mx.device_info().get(
+        sys_available = psutil.virtual_memory().available
+        mlx_limit = mx.device_info().get(
             "max_recommended_working_set_size",
             mx.device_info().get("memory_size", 0),
         )
         mlx_used = mx.get_active_memory()
-        usable = min(int(vm.total * self._mem_fraction_static), metal_limit)
+        mlx_usable = int(mlx_limit * self._mem_fraction_static)
         kv_budget = min(
-            max(usable - mlx_used, 0),
-            int(vm.available * self._mem_fraction_static),
+            max(mlx_usable - mlx_used, 0),
+            int(sys_available * self._mem_fraction_static),
         )
         bytes_per_slot = 2 * num_layers * n_kv_heads * head_dim * dtype.size
         pool_size = max(kv_budget // bytes_per_slot, 256)
         logger.info(
-            f"Auto-sized KV pool: total_ram={vm.total / (1024**3):.1f} GB, "
-            f"sys_available={vm.available / (1024**3):.2f} GB, "
-            f"metal_limit={metal_limit / (1024**3):.1f} GB, "
+            f"Auto-sized KV pool: "
+            f"sys_available={sys_available / (1024**3):.2f} GB, "
+            f"mlx_limit={mlx_limit / (1024**3):.1f} GB, "
             f"mlx_used={mlx_used / (1024**3):.2f} GB, "
             f"kv_budget={kv_budget / (1024**3):.2f} GB, "
             f"bytes_per_slot={bytes_per_slot}, pool_size={pool_size}"
