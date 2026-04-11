@@ -388,6 +388,8 @@ class SchedulerOutputProcessorMixin:
         if batch.spec_algorithm.is_none() or batch.is_spec_v2:
             if batch.is_spec_v2:
                 next_token_ids = self._resolve_spec_overlap_token_ids(result, batch)
+            elif isinstance(next_token_ids, list):
+                pass  # MLX path: already a list[int], skip torch round-trip
             else:
                 next_token_ids = next_token_ids.tolist()
 

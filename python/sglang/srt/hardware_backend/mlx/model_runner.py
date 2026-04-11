@@ -65,7 +65,8 @@ class MlxModelRunner:
 
         self._req_caches: dict[str, list[ContiguousKVCache | PoolBackedCache]] = {}
         self._req_token_ids: dict[str, list[int]] = {}
-        self._cache_pool: list[list[ContiguousKVCache]] = []  # reusable caches
+        self._cache_pool: list[list[ContiguousKVCache]] = []
+        # Pending async decode state (set by decode_batch_async, consumed by decode_batch_finalize)
 
         self._kv_pool: MlxKVPool | None = None
         self._req_to_token_pool: ReqToTokenPool | None = None
@@ -419,6 +420,61 @@ class MlxModelRunner:
             self._req_token_ids[rid].append(next_tokens[i])
 
         return next_tokens
+
+    # ------------------------------------------------------------------
+    # Internal: build decode forward graph (lazy, no eval)
+    # ------------------------------------------------------------------
+    def _build_decode_graph(
+        self,
+        req_ids: list[str],
+        input_tokens_override: mx.array | None = None,
+    ) -> mx.array:
+        """Build the decode computation graph and return lazy next-token ids.
+
+        If *input_tokens_override* is given (a lazy ``mx.array`` from a
+        chained previous step), it is used as model input instead of
+        reading the last token from ``_req_token_ids``.
+        """
+        batch_size = len(req_ids)
+        num_layers = self._num_layers
+
+        caches = [self._req_caches[rid] for rid in req_ids]
+        seq_lens = [caches[i][0].offset for i in range(batch_size)]
+
+        if batch_size == 1:
+            cache = caches[0]
+            if input_tokens_override is not None:
+                input_ids = input_tokens_override
+            else:
+                last_token = self._req_token_ids[req_ids[0]][-1]
+                input_ids = mx.array([[last_token]], dtype=mx.int32)
+            model_output = self.model(input_ids, cache=cache)
+            logits = self._extract_logits(model_output)
+            return mx.argmax(logits[:, -1, :], axis=-1)
+        else:
+            layer_caches = [
+                [caches[i][layer_idx] for i in range(batch_size)]
+                for layer_idx in range(num_layers)
+            ]
+            ctx = BatchedDecodeContext(
+                batch_size=batch_size,
+                seq_lens=seq_lens,
+                layer_caches=layer_caches,
+            )
+            set_context(ctx)
+            try:
+                max_offset = max(seq_lens)
+                shim_cache = [OffsetCache(offset=max_offset) for _ in range(num_layers)]
+                if input_tokens_override is not None:
+                    batched_input = input_tokens_override
+                else:
+                    last_tokens = [self._req_token_ids[rid][-1] for rid in req_ids]
+                    batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
+                model_output = self.model(batched_input, cache=shim_cache)
+                logits = self._extract_logits(model_output)
+                return mx.argmax(logits[:, -1, :], axis=-1)
+            finally:
+                clear_context()
 
     def has_request(self, req_id: str) -> bool:
         """Check if a request has active state."""
