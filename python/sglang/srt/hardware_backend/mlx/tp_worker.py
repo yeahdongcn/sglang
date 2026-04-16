@@ -118,13 +118,13 @@ class MlxTpModelWorker(TpModelWorker):
 
         # Auto-cleanup: remove MLX state for requests no longer in the batch.
         current_rids = {req.rid for req in reqs}
-        stale_rids = self._mlx_active_rids - current_rids
-        for rid in stale_rids:
-            self._mlx_runner.remove_request(rid)
         if forward_mode.is_decode():
+            stale_rids = self._mlx_active_rids - current_rids
+            for rid in stale_rids:
+                self._mlx_runner.remove_request(rid)
             self._mlx_active_rids = current_rids
         else:
-            self._mlx_active_rids = (self._mlx_active_rids - stale_rids) | current_rids
+            self._mlx_active_rids |= current_rids
 
         next_token_ids_list = []
 

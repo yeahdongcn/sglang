@@ -122,7 +122,7 @@ class MLXAttentionWrapper(nn.Module):
             mask_bool = positions[None, :] >= valid_lens[:, None]
             attn_mask = mx.where(
                 mask_bool[:, None, None, :],
-                mx.array(-1e9, dtype=queries.dtype),
+                mx.array(mx.finfo(queries.dtype).min, dtype=queries.dtype),
                 mx.array(0.0, dtype=queries.dtype),
             )
 
