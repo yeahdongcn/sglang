@@ -29,15 +29,17 @@ class BatchedDecodeContext:
     valid_lens: mx.array = field(init=False)
     needs_padding: bool = field(init=False)
     pad_sizes: list[int] = field(init=False)
+    positions: Optional[mx.array] = field(init=False)
 
     def __post_init__(self) -> None:
         seq_lens = self.seq_lens
         max_seq_len = max(seq_lens)
         self.offsets = mx.array(seq_lens, dtype=mx.int32)
         self.max_len = max_seq_len + 1
-        self.valid_lens = mx.array([s + 1 for s in seq_lens], dtype=mx.int32)
+        self.valid_lens = self.offsets + 1
         self.needs_padding = min(seq_lens) < max_seq_len
         self.pad_sizes = [max_seq_len - s for s in seq_lens]
+        self.positions = mx.arange(self.max_len) if self.needs_padding else None
 
 
 def set_context(ctx: Optional[BatchedDecodeContext]) -> None:
@@ -132,8 +134,7 @@ class MLXAttentionWrapper(nn.Module):
 
         attn_mask = None
         if ctx.needs_padding:
-            positions = mx.arange(max_len)
-            mask_bool = positions[None, :] >= ctx.valid_lens[:, None]
+            mask_bool = ctx.positions[None, :] >= ctx.valid_lens[:, None]
             attn_mask = mx.where(
                 mask_bool[:, None, None, :],
                 mx.array(mx.finfo(queries.dtype).min, dtype=queries.dtype),
