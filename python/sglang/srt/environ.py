@@ -327,8 +327,9 @@ class Envs:
     SGLANG_ROCM_DISABLE_LINEARQUANT = EnvBool(False)
     SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(4096)
 
-    # MPS (Apple Silicon)
+    # Metal (Apple Silicon)
     SGLANG_USE_MLX = EnvBool(False)
+    SGLANG_MLX_USE_CUSTOM_METAL_ROPE = EnvBool(False)
 
     # NPU
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)

@@ -14,6 +14,7 @@ import mlx.core as mx
 import psutil
 from mlx_lm import load as mlx_lm_load
 
+from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.mlx.kv_cache import (
     BatchedDecodeContext,
     ContiguousKVCache,
@@ -62,6 +63,11 @@ class MlxModelRunner:
 
         self._num_layers = get_num_layers(self.model)
         self._max_seq_len = 4096  # doubles on overflow
+
+        self._cos_sin_cache: mx.array | None = None
+        self._rope_config: dict = {}
+        if envs.SGLANG_MLX_USE_CUSTOM_METAL_ROPE.get():
+            self._init_rope_cache()
 
         self._req_caches: dict[str, list[ContiguousKVCache | PoolBackedCache]] = {}
         self._req_token_ids: dict[str, list[int]] = {}
@@ -139,6 +145,60 @@ class MlxModelRunner:
         if hasattr(sample_attn, "k_proj") and hasattr(sample_attn.k_proj, "weight"):
             dtype = sample_attn.k_proj.weight.dtype
         return n_kv_heads, head_dim, dtype
+
+    def _init_rope_cache(self) -> None:
+        """Build cos_sin_cache + rope_config for the custom Metal RoPE kernel.
+
+        Only enabled when the model uses ``mlx.nn.RoPE`` with
+        ``traditional=False`` (NeoX style); other rope variants fall back to
+        ``mx.fast.rope`` at runtime.
+        """
+        import mlx.nn as nn
+
+        layer_list, attn_attr = find_attention_layers(self.model)
+        if not layer_list:
+            return
+        sample_attn = getattr(layer_list[0], attn_attr)
+        if isinstance(sample_attn, MLXAttentionWrapper):
+            sample_attn = sample_attn._inner
+        rope = getattr(sample_attn, "rope", None)
+        if not isinstance(rope, nn.RoPE) or rope.traditional:
+            logger.info(
+                "Custom Metal RoPE disabled: rope module %s is not nn.RoPE(traditional=False)",
+                type(rope).__name__,
+            )
+            return
+
+        head_dim = int(rope.dims)
+        base = float(rope.base)
+        scale = float(getattr(rope, "scale", 1.0))
+        model_args = getattr(self.model, "args", None)
+        max_pos = int(getattr(model_args, "max_position_embeddings", 8192))
+
+        half_dim = head_dim // 2
+        inv_freq = base ** (-mx.arange(0, half_dim, dtype=mx.float32) * 2 / head_dim)
+        positions = mx.arange(max_pos, dtype=mx.float32) * scale
+        freqs = positions[:, None] * inv_freq[None, :]
+        cos_sin_cache = mx.concatenate([mx.cos(freqs), mx.sin(freqs)], axis=-1)
+        mx.eval(cos_sin_cache)
+
+        n_kv_heads, _, _ = self._get_attn_config()
+        n_qo_heads = sample_attn.n_heads
+
+        self._cos_sin_cache = cos_sin_cache
+        self._rope_config = {
+            "head_dim": head_dim,
+            "rope_dim": head_dim,
+            "num_qo_heads": int(n_qo_heads),
+            "num_kv_heads": int(n_kv_heads),
+        }
+        logger.info(
+            "Custom Metal RoPE enabled: head_dim=%d, base=%g, scale=%g, max_pos=%d",
+            head_dim,
+            base,
+            scale,
+            max_pos,
+        )
 
     def _compute_pool_size(self, explicit_size: int | None) -> int:
         """Determine pool slot count (auto-size from available memory if needed)."""
@@ -393,6 +453,8 @@ class MlxModelRunner:
                 batch_size=batch_size,
                 seq_lens=seq_lens,
                 layer_caches=layer_caches,
+                cos_sin_cache=self._cos_sin_cache,
+                rope_config=self._rope_config,
             )
             set_context(ctx)
             try:

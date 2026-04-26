@@ -22,6 +22,8 @@ class BatchedDecodeContext:
     seq_lens: list[int]  # per-request token count before the new token
     # layer_caches[layer_idx][req_idx] = ContiguousKVCache
     layer_caches: list[list[ContiguousKVCache]]
+    cos_sin_cache: Optional[mx.array] = None
+    rope_config: dict = field(default_factory=dict)
 
     # Derived tensors/metadata, shared across all layers in one forward pass.
     offsets: mx.array = field(init=False)
@@ -97,11 +99,15 @@ class MLXAttentionWrapper(nn.Module):
 
         # Vectorized RoPE with per-batch offsets
         offsets = ctx.offsets
-        queries = inner.rope(queries, offset=offsets)
-        keys = inner.rope(keys, offset=offsets)
+        if ctx.cos_sin_cache is not None:
+            queries, keys = self._rope_custom(
+                queries, keys, offsets, ctx.cos_sin_cache, ctx.rope_config
+            )
+        else:
+            queries = inner.rope(queries, offset=offsets)
+            keys = inner.rope(keys, offset=offsets)
 
         layer_caches = ctx.layer_caches[layer_idx]
-        max_len = ctx.max_len
         pad_sizes = ctx.pad_sizes
 
         # TODO: replace per-request loop with native batched/ragged
@@ -147,3 +153,24 @@ class MLXAttentionWrapper(nn.Module):
 
         output = output.transpose(0, 2, 1, 3).reshape(B, 1, -1)
         return inner.o_proj(output)
+
+    @staticmethod
+    def _rope_custom(
+        queries: mx.array,
+        keys: mx.array,
+        positions: mx.array,
+        cos_sin_cache: mx.array,
+        rope_config: dict,
+    ) -> tuple[mx.array, mx.array]:
+        from sgl_kernel.metal import rope_neox
+
+        q_flat = queries[:, :, 0, :]
+        k_flat = keys[:, :, 0, :]
+        q_rot, k_rot = rope_neox(
+            q_flat,
+            k_flat,
+            cos_sin_cache,
+            positions,
+            **rope_config,
+        )
+        return q_rot[:, :, None, :], k_rot[:, :, None, :]
