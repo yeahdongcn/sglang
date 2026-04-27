@@ -70,15 +70,13 @@ def _ensure_build_requires():
     )
 
 
+# Section 1: Prerequisites
 _ensure_toolchain()
 _ensure_build_requires()
 os.chdir(root)
 
 
-# ---------------------------------------------------------------------------
 # Section 2: Build and install
-# ---------------------------------------------------------------------------
-
 from setuptools import Extension, find_packages, setup  # noqa: E402
 from setuptools.command.build_ext import build_ext  # noqa: E402
 
