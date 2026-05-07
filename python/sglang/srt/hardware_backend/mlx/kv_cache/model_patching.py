@@ -26,8 +26,8 @@ def find_attention_layers(model: Any) -> tuple[list[Any], str]:
 def patch_model_attention(model: Any) -> int:
     """Install MLXAttentionWrapper on all attention layers (idempotent).
 
-    The wrapper delegates to the inner module when no BatchedDecodeContext
-    is set, so it is always installed and never removed.
+    The wrapper delegates to the inner module when no paged context is set,
+    so it is always installed and never removed.
     """
     layer_list, attn_attr = find_attention_layers(model)
     patched = 0

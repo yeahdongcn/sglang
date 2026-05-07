@@ -95,10 +95,10 @@ metallib_name = "sgl_metal_kernels.metallib"
 # Metal shader sources (compiled with `xcrun metal`) and C++ host sources
 # (compiled with `c++`). Add new kernels by appending to these lists.
 metal_shader_sources = [
-    "csrc/metal/placeholder.metal",
+    "csrc/metal/attention.metal",
 ]
 cxx_sources = [
-    "csrc/metal/placeholder.cpp",
+    "csrc/metal/attention.cpp",
 ]
 
 # Header search paths shared by both the Metal shader compiler and the C++
@@ -275,6 +275,15 @@ class BuildMetalExtension(build_ext):
         staged_metallib = ext_path.parent / metallib_path.name
         if metallib_path.resolve() != staged_metallib.resolve():
             shutil.copy2(metallib_path, staged_metallib)
+
+    def copy_extensions_to_source(self):
+        super().copy_extensions_to_source()
+        metallib_path = root / "build" / "metal" / metallib_name
+        if not metallib_path.is_file():
+            return
+        inplace_metallib = root / "python" / operator_namespace / metallib_path.name
+        if metallib_path.resolve() != inplace_metallib.resolve():
+            shutil.copy2(metallib_path, inplace_metallib)
 
 
 ext_modules = [

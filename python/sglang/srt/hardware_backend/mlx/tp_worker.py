@@ -1,8 +1,8 @@
 """MLX-specific TpModelWorker subclass for Apple Silicon.
 
 Routes forward passes through the MLX model runner, bypassing PyTorch
-MPS.  A lightweight stub provides scheduler bookkeeping; the actual
-KV data lives in MlxKVPool.
+MPS. A lightweight stub provides scheduler bookkeeping; scheduler-visible
+KV data lives in the MLX paged KV cache.
 """
 
 import logging
@@ -73,7 +73,7 @@ class MlxTpModelWorker(TpModelWorker):
         return None
 
     def _ensure_mlx_pool_initialized(self):
-        """Lazily initialize the MlxKVPool after the stub's pools are ready."""
+        """Lazily initialize MLX paged KV cache metadata after stub pools are ready."""
         if not self._mlx_pool_initialized:
             self._mlx_runner.init_kv_pool(self._model_runner.req_to_token_pool)
             self._mlx_pool_initialized = True
@@ -129,9 +129,6 @@ class MlxTpModelWorker(TpModelWorker):
         next_token_ids_list = []
 
         if forward_mode.is_extend():
-            # Ensure pool is up-to-date before PoolBackedCache reads it
-            # for prefix-cached prefills.  Only runs on extend batches.
-            self._mlx_runner.flush_all_decode_kv()
             input_ids_cpu = model_worker_batch.input_ids.cpu().tolist()
             out_cache_loc_cpu = model_worker_batch.out_cache_loc.cpu().tolist()
             extend_seq_lens = model_worker_batch.extend_seq_lens

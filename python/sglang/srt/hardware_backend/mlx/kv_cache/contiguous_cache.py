@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 import mlx.core as mx
 
-if TYPE_CHECKING:
-    from sglang.srt.hardware_backend.mlx.kv_cache.kv_pool import MlxKVPool
+
+class LayerKVStore(Protocol):
+    def get_kv(self, layer_id: int, slots: mx.array) -> tuple[mx.array, mx.array]: ...
 
 
 class OffsetCache:
@@ -140,7 +141,7 @@ class PoolBackedCache:
 
     def __init__(
         self,
-        pool: MlxKVPool,
+        pool: LayerKVStore,
         layer_idx: int,
         slots: mx.array,
         prefix_len: int,

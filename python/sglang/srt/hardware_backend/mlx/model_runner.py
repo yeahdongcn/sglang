@@ -2,12 +2,14 @@
 
 Slot allocation and radix-trie prefix matching are handled by the
 scheduler (``TokenToKVPoolAllocator`` / ``RadixCache``).  This runner
-reads cached KV from ``MlxKVPool``, runs the forward pass, and writes
-new KV back.  Each request also keeps a ``ContiguousKVCache`` for
-decode-time attention.
+stores scheduler-visible KV in ``MlxPagedKVCache`` so the Metal attention
+backend can read reused prefixes and decode state directly from paged blocks.
 """
 
+import importlib
 import logging
+import platform
+import sys
 import time
 
 import mlx.core as mx
@@ -15,21 +17,50 @@ import psutil
 from mlx_lm import load as mlx_lm_load
 
 from sglang.srt.hardware_backend.mlx.kv_cache import (
-    BatchedDecodeContext,
-    ContiguousKVCache,
     MLXAttentionWrapper,
     OffsetCache,
-    PoolBackedCache,
-    clear_context,
+    PagedAttentionContext,
+    clear_paged_context,
     find_attention_layers,
     get_num_layers,
     patch_model_attention,
-    set_context,
+    set_paged_context,
 )
-from sglang.srt.hardware_backend.mlx.kv_cache.kv_pool import MlxKVPool
+from sglang.srt.hardware_backend.mlx.kv_cache.paged_cache import MlxPagedKVCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_METAL_APIS = (
+    "paged_kv_scatter",
+    "prefill_attention_paged",
+    "decode_attention_paged",
+)
+
+
+def _check_mlx_metal_backend_available() -> None:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        raise RuntimeError("MLX Metal backend requires Apple Silicon")
+    try:
+        metal = importlib.import_module("sgl_kernel.metal")
+    except ImportError as exc:
+        raise RuntimeError("MLX Metal backend requires sgl_kernel.metal") from exc
+    missing_apis = [name for name in _REQUIRED_METAL_APIS if not hasattr(metal, name)]
+    if missing_apis:
+        raise RuntimeError(
+            "MLX Metal backend requires sgl_kernel.metal APIs: "
+            + ", ".join(missing_apis)
+        )
+    require_extension = getattr(metal, "_require_metal_extension", None)
+    try:
+        if require_extension is not None:
+            require_extension()
+        elif getattr(metal, "_metal", None) is None:
+            raise ImportError("sgl_kernel._metal is not available")
+    except ImportError as exc:
+        raise RuntimeError(
+            "MLX Metal backend requires the native sgl_kernel._metal extension"
+        ) from exc
 
 
 class MlxModelRunner:
@@ -43,6 +74,8 @@ class MlxModelRunner:
         pool_size: int | None = None,
         mem_fraction_static: float = 0.8,
     ):
+        _check_mlx_metal_backend_available()
+
         self.model_path = model_path
         self.trust_remote_code = trust_remote_code
         self.model = None
@@ -63,16 +96,15 @@ class MlxModelRunner:
         self._num_layers = get_num_layers(self.model)
         self._max_seq_len = 4096  # doubles on overflow
 
-        self._req_caches: dict[str, list[ContiguousKVCache | PoolBackedCache]] = {}
         self._req_token_ids: dict[str, list[int]] = {}
-        self._cache_pool: list[list[ContiguousKVCache]] = []  # reusable caches
 
-        self._kv_pool: MlxKVPool | None = None
+        self._paged_kv_cache: MlxPagedKVCache | None = None
         self._req_to_token_pool: ReqToTokenPool | None = None
         self._req_pool_idx: dict[str, int] = {}
         self._req_synced_offset: dict[str, int] = {}
 
         self._pool_size = self._compute_pool_size(pool_size)
+        self._paged_attention_block_size = 1
 
     @staticmethod
     def _extract_logits(model_output):
@@ -81,27 +113,9 @@ class MlxModelRunner:
             return model_output[0]
         return model_output
 
-    def _acquire_cache(self) -> list[ContiguousKVCache]:
-        """Get a reusable cache list from the pool, or create a new one."""
-        if self._cache_pool:
-            cache = self._cache_pool.pop()
-            for c in cache:
-                c.offset = 0
-            return cache
-        return [
-            ContiguousKVCache(max_seq_len=self._max_seq_len)
-            for _ in range(self._num_layers)
-        ]
-
-    def _release_cache(self, cache: list[ContiguousKVCache]) -> None:
-        """Return a cache list to the pool for reuse."""
-        self._cache_pool.append(cache)
-
     @staticmethod
-    def _eval_with_cache(
-        token_result: mx.array, cache: list[ContiguousKVCache | PoolBackedCache]
-    ) -> None:
-        """Evaluate token result and all cache buffers in one mx.eval call."""
+    def _eval_with_cache(token_result: mx.array, cache: list[OffsetCache]) -> None:
+        """Evaluate token result and cache protocol state in one mx.eval call."""
         mx.eval(token_result, *[s for c in cache for s in c.state])
 
     def _load_model(self):
@@ -174,24 +188,33 @@ class MlxModelRunner:
         return self._pool_size
 
     def init_kv_pool(self, req_to_token_pool: ReqToTokenPool) -> None:
-        """Create MlxKVPool (+1 for padding slot 0) and wire scheduler pools."""
+        """Create paged KV cache storage and wire scheduler pools."""
         self._req_to_token_pool = req_to_token_pool
-        if self.disable_radix_cache:
-            return
         n_kv_heads, head_dim, dtype = self._get_attn_config()
-        # +1 for padding slot 0
-        self._kv_pool = MlxKVPool(
-            pool_size=self._pool_size + 1,
+        block_size = self._get_paged_attention_block_size()
+        capacity = self._pool_size + 1
+        num_blocks = (capacity + block_size - 1) // block_size
+        self._paged_kv_cache = MlxPagedKVCache(
+            num_blocks=num_blocks,
+            block_size=block_size,
             num_layers=self._num_layers,
             n_kv_heads=n_kv_heads,
             head_dim=head_dim,
             dtype=dtype,
         )
         logger.info(
-            f"KV pool initialized: pool_size={self._pool_size} "
-            f"(buffer size {self._pool_size + 1} incl. padding slot 0), "
+            f"Paged KV cache initialized: pool_size={self._pool_size} "
+            f"(capacity {self._paged_kv_cache.capacity} incl. padding slot 0), "
+            f"block_size={block_size}, num_blocks={num_blocks}, "
             f"{self._num_layers} layers, {n_kv_heads} kv_heads, {head_dim} head_dim"
         )
+
+    def _make_cache_shim(self, offset: int) -> list[OffsetCache]:
+        return [OffsetCache(offset=offset) for _ in range(self._num_layers)]
+
+    def _require_paged_kv_scatter(self, ctx: PagedAttentionContext) -> None:
+        if not ctx.has_scattered_all_layers(self._num_layers):
+            raise RuntimeError("MLX paged attention did not scatter KV for all layers")
 
     def prefill(
         self,
@@ -203,72 +226,42 @@ class MlxModelRunner:
         req_pool_idx: int,
     ) -> int:
         """Prefill a request.  Returns next_token_id."""
-        num_layers = self._num_layers
+        if self._paged_kv_cache is None:
+            raise RuntimeError("MLX runner requires paged KV cache for prefill")
+
         prefix_len = len(prefix_slot_ids)
-
-        if self.disable_radix_cache:
-            cache = self._acquire_cache()
-            input_ids = mx.array([new_token_ids], dtype=mx.int32)
-            model_output = self.model(input_ids, cache=cache)
-            logits = self._extract_logits(model_output)
-            next_token_mlx = mx.argmax(logits[:, -1, :], axis=-1)
-            self._eval_with_cache(next_token_mlx, cache)
-            next_token = int(next_token_mlx.item())
-
-            self._req_token_ids[req_id] = list(full_token_ids) + [next_token]
-            self._req_caches[req_id] = cache
-            self._req_pool_idx[req_id] = req_pool_idx
-            self._req_synced_offset[req_id] = 0
-            return next_token
-
-        assert self._kv_pool is not None
-
         new_token_count = len(new_token_ids)
-
-        if prefix_len > 0:
-            slot_ids_mx = mx.array(prefix_slot_ids, dtype=mx.int32)
-            cache = [
-                PoolBackedCache(self._kv_pool, i, slot_ids_mx, prefix_len)
-                for i in range(num_layers)
-            ]
-        else:
-            cache = self._acquire_cache()
-
         if new_token_count > 0:
             extend_tokens = new_token_ids
+            cache_offset = prefix_len
+            synced_offset = prefix_len + new_token_count
         else:
-            # Full cache hit — rerun last token to get next-token logits
             extend_tokens = full_token_ids[-1:]
-            for c in cache:
-                c.offset = max(c.offset - 1, 0)
+            cache_offset = max(prefix_len - 1, 0)
+            synced_offset = prefix_len
+
+        paged_ctx = self._build_paged_prefill_context(prefix_slot_ids, new_slot_ids)
+        if paged_ctx is None:
+            raise RuntimeError("MLX runner requires paged KV cache for prefill")
 
         input_ids = mx.array([extend_tokens], dtype=mx.int32)
-        model_output = self.model(input_ids, cache=cache)
+        cache = self._make_cache_shim(cache_offset)
+        set_paged_context(paged_ctx)
+        try:
+            model_output = self.model(input_ids, cache=cache)
+        finally:
+            clear_paged_context()
         logits = self._extract_logits(model_output)
 
         last_logits = logits[:, -1, :]
         next_token_mlx = mx.argmax(last_logits, axis=-1)
-
-        # Convert PoolBackedCache → ContiguousKVCache for decode
-        if prefix_len > 0:
-            contiguous_cache = self._acquire_cache()
-            for layer_idx in range(num_layers):
-                pbc = cache[layer_idx]
-                contiguous_cache[layer_idx].update_and_fetch(
-                    pbc._full_keys, pbc._full_values
-                )
-            cache = contiguous_cache
-
         self._eval_with_cache(next_token_mlx, cache)
+        self._require_paged_kv_scatter(paged_ctx)
         next_token = int(next_token_mlx.item())
 
-        if new_slot_ids:
-            self._sync_new_kv_to_pool(cache, prefix_len, new_slot_ids)
-
         self._req_token_ids[req_id] = list(full_token_ids) + [next_token]
-        self._req_caches[req_id] = cache
         self._req_pool_idx[req_id] = req_pool_idx
-        self._req_synced_offset[req_id] = prefix_len + len(new_slot_ids)
+        self._req_synced_offset[req_id] = synced_offset
 
         return next_token
 
@@ -279,170 +272,242 @@ class MlxModelRunner:
         new_slot_ids: list[int],
     ) -> int:
         """Continue prefill for a chunked request.  Returns next_token_id."""
-        assert req_id in self._req_caches, f"extend called for unknown request {req_id}"
+        assert (
+            req_id in self._req_token_ids
+        ), f"extend called for unknown request {req_id}"
 
-        cache = self._req_caches[req_id]
+        paged_ctx = self._build_paged_extend_context(req_id, new_slot_ids)
+        if paged_ctx is None:
+            raise RuntimeError("MLX runner requires paged KV cache for extend")
 
+        offset = int(self._req_synced_offset.get(req_id, 0))
         input_ids = mx.array([new_token_ids], dtype=mx.int32)
-        model_output = self.model(input_ids, cache=cache)
+        cache = self._make_cache_shim(offset)
+        set_paged_context(paged_ctx)
+        try:
+            model_output = self.model(input_ids, cache=cache)
+        finally:
+            clear_paged_context()
         logits = self._extract_logits(model_output)
 
         last_logits = logits[:, -1, :]
         next_token_mlx = mx.argmax(last_logits, axis=-1)
         self._eval_with_cache(next_token_mlx, cache)
+        self._require_paged_kv_scatter(paged_ctx)
         next_token = int(next_token_mlx.item())
 
         prev_tokens = self._req_token_ids[req_id]
         if prev_tokens:
-            prev_tokens.pop()  # remove stale intermediate token
+            prev_tokens.pop()
         prev_tokens.extend(new_token_ids)
         prev_tokens.append(next_token)
-
-        # Sync new chunk KV to pool immediately
-        if not self.disable_radix_cache and new_slot_ids:
-            synced = self._req_synced_offset[req_id]
-            self._sync_new_kv_to_pool(cache, synced, new_slot_ids)
-            self._req_synced_offset[req_id] = synced + len(new_slot_ids)
+        self._req_synced_offset[req_id] = offset + len(new_slot_ids)
 
         return next_token
 
-    def _sync_new_kv_to_pool(
-        self,
-        cache: list[ContiguousKVCache],
-        cache_start: int,
-        slot_ids: list[int],
-    ) -> None:
-        """Sync KV from contiguous cache to pool at the given slot IDs."""
-        if not slot_ids or self._kv_pool is None:
-            return
-        num_layers = len(cache)
-        end = cache_start + len(slot_ids)
-        slot_ids_mx = mx.array(slot_ids, dtype=mx.int32)
-        # Transpose cache (1, n_kv_heads, S, head_dim) → pool (S, n_kv_heads, head_dim)
-        k_all = mx.stack(
-            [
-                cache[i].keys[0, :, cache_start:end, :].transpose(1, 0, 2)
-                for i in range(num_layers)
-            ]
-        )
-        v_all = mx.stack(
-            [
-                cache[i].values[0, :, cache_start:end, :].transpose(1, 0, 2)
-                for i in range(num_layers)
-            ]
-        )
-        self._kv_pool.set_kv_all_layers(slot_ids_mx, k_all, v_all)
+    def flush_all_decode_kv(self) -> None:
+        """No-op because native paged attention scatters decode KV directly."""
+        return
 
-    def _sync_decode_kv_to_pool(self, req_id: str) -> None:
-        """Sync un-flushed decode KV for *req_id* to the shared pool."""
-        if self._kv_pool is None or self._req_to_token_pool is None:
-            return
-        cache = self._req_caches.get(req_id)
-        if cache is None:
-            return
-        current_offset = cache[0].offset
-        synced_offset = self._req_synced_offset.get(req_id, 0)
-        if current_offset <= synced_offset:
-            return
+    def _get_paged_attention_block_size(self) -> int:
+        paged_cache = getattr(self, "_paged_kv_cache", None)
+        block_size = getattr(paged_cache, "block_size", None)
+        if block_size is None:
+            block_size = getattr(self, "_paged_attention_block_size", 1)
+        block_size = int(block_size)
+        if block_size <= 0:
+            raise ValueError("paged attention block size must be positive")
+        return block_size
+
+    @staticmethod
+    def _make_cu_seqlens(seq_lens: list[int]) -> list[int]:
+        cu_seqlens = [0]
+        for seq_len in seq_lens:
+            cu_seqlens.append(cu_seqlens[-1] + seq_len)
+        return cu_seqlens
+
+    def _build_block_tables(
+        self, slot_rows: list[list[int]], context_lens: list[int]
+    ) -> tuple[list[list[int]], int]:
+        block_size = self._get_paged_attention_block_size()
+        max_context_len = max(context_lens, default=0)
+        max_blocks = (max_context_len + block_size - 1) // block_size
+        block_tables = []
+        for row, context_len in zip(slot_rows, context_lens, strict=True):
+            blocks = [
+                row[start] // block_size for start in range(0, context_len, block_size)
+            ]
+            blocks.extend([0] * (max_blocks - len(blocks)))
+            block_tables.append(blocks)
+        return block_tables, max_context_len
+
+    def _build_paged_prefill_context(
+        self, prefix_slot_ids: list[int], new_slot_ids: list[int]
+    ) -> PagedAttentionContext | None:
+        paged_cache = getattr(self, "_paged_kv_cache", None)
+        if paged_cache is None:
+            return None
+        prefix_slot_ids = list(prefix_slot_ids)
+        new_slot_ids = list(new_slot_ids)
+        if new_slot_ids:
+            q_len = len(new_slot_ids)
+            offset = len(prefix_slot_ids)
+            context_len = offset + q_len
+            slot_mapping = new_slot_ids
+            radix_prefix_len = offset
+            slot_row = prefix_slot_ids + new_slot_ids
+        elif prefix_slot_ids:
+            q_len = 1
+            context_len = len(prefix_slot_ids)
+            offset = context_len - 1
+            slot_mapping = [prefix_slot_ids[-1]]
+            radix_prefix_len = offset
+            slot_row = prefix_slot_ids
+        else:
+            return None
+
+        block_tables, max_context_len = self._build_block_tables(
+            [slot_row], [context_len]
+        )
+        return PagedAttentionContext(
+            is_prefill=True,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=[context_len],
+            offsets=[offset],
+            cu_seqlens=self._make_cu_seqlens([q_len]),
+            max_seqlen_q=q_len,
+            max_seqlen_k=max_context_len,
+            radix_prefix_lens=[radix_prefix_len],
+            kv_pool=paged_cache,
+        )
+
+    def _build_paged_extend_context(
+        self, req_id: str, new_slot_ids: list[int]
+    ) -> PagedAttentionContext | None:
+        req_to_token_pool = getattr(self, "_req_to_token_pool", None)
+        paged_cache = getattr(self, "_paged_kv_cache", None)
+        if paged_cache is None or req_to_token_pool is None or not new_slot_ids:
+            return None
         req_pool_idx = self._req_pool_idx.get(req_id)
         if req_pool_idx is None:
-            return
-        # Read slot IDs from scheduler's req_to_token_pool
-        slot_ids = (
-            self._req_to_token_pool.req_to_token[
-                req_pool_idx, synced_offset:current_offset
-            ]
-            .to(dtype=int)
-            .tolist()
-        )
-        self._sync_new_kv_to_pool(cache, synced_offset, slot_ids)
-        self._req_synced_offset[req_id] = current_offset
+            return None
 
-    def flush_all_decode_kv(self) -> None:
-        """Sync all active requests' un-flushed decode KV to the pool."""
-        if self.disable_radix_cache or self._kv_pool is None:
-            return
-        for req_id in list(self._req_caches.keys()):
-            self._sync_decode_kv_to_pool(req_id)
+        q_len = len(new_slot_ids)
+        offset = int(self._req_synced_offset.get(req_id, 0))
+        context_len = offset + q_len
+        slot_rows = req_to_token_pool.req_to_token[[req_pool_idx], :context_len].to(
+            dtype=int
+        )
+        slot_rows = slot_rows.tolist()
+        block_tables, max_context_len = self._build_block_tables(
+            slot_rows, [context_len]
+        )
+
+        return PagedAttentionContext(
+            is_prefill=True,
+            slot_mapping=list(new_slot_ids),
+            block_tables=block_tables,
+            context_lens=[context_len],
+            offsets=[offset],
+            cu_seqlens=self._make_cu_seqlens([q_len]),
+            max_seqlen_q=q_len,
+            max_seqlen_k=max_context_len,
+            radix_prefix_lens=[offset],
+            kv_pool=paged_cache,
+        )
+
+    def _build_paged_decode_context(
+        self, req_ids: list[str], seq_lens: list[int]
+    ) -> PagedAttentionContext | None:
+        req_to_token_pool = getattr(self, "_req_to_token_pool", None)
+        paged_cache = getattr(self, "_paged_kv_cache", None)
+        if paged_cache is None or req_to_token_pool is None or not req_ids:
+            return None
+
+        max_context_len = max(seq_lens) + 1
+        req_pool_indices = [self._req_pool_idx[rid] for rid in req_ids]
+        slot_rows = req_to_token_pool.req_to_token[
+            req_pool_indices, :max_context_len
+        ].to(dtype=int)
+        slot_rows = slot_rows.tolist()
+
+        context_lens = [seq_len + 1 for seq_len in seq_lens]
+        slot_mapping = [
+            row[seq_len] for row, seq_len in zip(slot_rows, seq_lens, strict=True)
+        ]
+        block_tables, max_context_len = self._build_block_tables(
+            slot_rows, context_lens
+        )
+
+        synced_offsets = getattr(self, "_req_synced_offset", {})
+        radix_prefix_lens = [
+            min(int(synced_offsets.get(rid, 0)), seq_len)
+            for rid, seq_len in zip(req_ids, seq_lens, strict=True)
+        ]
+
+        return PagedAttentionContext(
+            is_prefill=False,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            offsets=seq_lens,
+            cu_seqlens=self._make_cu_seqlens([1] * len(req_ids)),
+            max_seqlen_q=1,
+            max_seqlen_k=max_context_len,
+            radix_prefix_lens=radix_prefix_lens,
+            kv_pool=paged_cache,
+        )
 
     def decode_batch(
         self,
         req_ids: list[str],
     ) -> list[int]:
         """Decode one token per request."""
-        batch_size = len(req_ids)
-        num_layers = self._num_layers
+        if not req_ids:
+            return []
 
-        caches = [self._req_caches[rid] for rid in req_ids]
-        seq_lens = [caches[i][0].offset for i in range(batch_size)]
+        seq_lens = [len(self._req_token_ids[rid]) - 1 for rid in req_ids]
+        paged_ctx = self._build_paged_decode_context(req_ids, seq_lens)
+        if paged_ctx is None:
+            raise RuntimeError("MLX runner requires paged KV cache for decode")
 
-        if batch_size == 1:
-            cache = caches[0]
-            last_token = self._req_token_ids[req_ids[0]][-1]
-            input_ids = mx.array([[last_token]], dtype=mx.int32)
-            model_output = self.model(input_ids, cache=cache)
-            logits = self._extract_logits(model_output)
-            next_tokens_mlx = mx.argmax(logits[:, -1, :], axis=-1)
-            self._eval_with_cache(next_tokens_mlx, cache)
-        else:
-            layer_caches = [
-                [caches[i][layer_idx] for i in range(batch_size)]
-                for layer_idx in range(num_layers)
-            ]
-            ctx = BatchedDecodeContext(
-                batch_size=batch_size,
-                seq_lens=seq_lens,
-                layer_caches=layer_caches,
-            )
-            set_context(ctx)
-            try:
-                max_offset = max(seq_lens)
-                shim_cache = [OffsetCache(offset=max_offset) for _ in range(num_layers)]
-                last_tokens = [self._req_token_ids[rid][-1] for rid in req_ids]
-                batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
-                model_output = self.model(batched_input, cache=shim_cache)
-                logits = self._extract_logits(model_output)
-                next_tokens_mlx = mx.argmax(logits[:, -1, :], axis=-1)
+        max_offset = max(seq_lens)
+        cache = self._make_cache_shim(max_offset)
+        last_tokens = [self._req_token_ids[rid][-1] for rid in req_ids]
+        batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
 
-                eval_targets = [next_tokens_mlx]
-                for c_list in caches:
-                    for c in c_list:
-                        eval_targets.append(c.keys)
-                        eval_targets.append(c.values)
-                mx.eval(*eval_targets)
-            finally:
-                clear_context()
+        set_paged_context(paged_ctx)
+        try:
+            model_output = self.model(batched_input, cache=cache)
+        finally:
+            clear_paged_context()
+        logits = self._extract_logits(model_output)
+        next_tokens_mlx = mx.argmax(logits[:, -1, :], axis=-1)
+        self._eval_with_cache(next_tokens_mlx, cache)
+        self._require_paged_kv_scatter(paged_ctx)
 
         next_tokens = next_tokens_mlx.tolist()
-
         for i, rid in enumerate(req_ids):
             self._req_token_ids[rid].append(next_tokens[i])
+            self._req_synced_offset[rid] = seq_lens[i] + 1
 
         return next_tokens
 
     def has_request(self, req_id: str) -> bool:
         """Check if a request has active state."""
-        return req_id in self._req_caches
+        return req_id in self._req_token_ids
 
     def remove_request(self, req_id: str):
-        """Sync remaining decode KV to pool, then release request state."""
-        if not self.disable_radix_cache:
-            self._sync_decode_kv_to_pool(req_id)
-
+        """Release request state."""
         self._req_token_ids.pop(req_id, None)
-        cache = self._req_caches.pop(req_id, None)
-        if cache is not None:
-            self._release_cache(cache)
         self._req_pool_idx.pop(req_id, None)
         self._req_synced_offset.pop(req_id, None)
 
     def clear(self):
         """Clear all request states."""
         self._req_token_ids.clear()
-        for cache in self._req_caches.values():
-            self._cache_pool.append(cache)
-        self._req_caches.clear()
         self._req_pool_idx.clear()
         self._req_synced_offset.clear()
-        if self._kv_pool is not None:
-            self._kv_pool.clear()
+        if self._paged_kv_cache is not None:
+            self._paged_kv_cache.clear()
