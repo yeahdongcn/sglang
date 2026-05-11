@@ -231,6 +231,21 @@ def alloc_extend_naive(
             ).view(-1)
 
 
+def alloc_decode_naive(seq_lens, last_loc, free_pages, out_indices, page_size):
+    new_page_offset = 0
+    for i in range(len(seq_lens)):
+        seq_len = int(seq_lens[i])
+        pre_len = seq_len - 1
+        num_new_pages = (seq_len + page_size - 1) // page_size - (
+            pre_len + page_size - 1
+        ) // page_size
+        if num_new_pages == 0:
+            out_indices[i] = last_loc[i] + 1
+        else:
+            out_indices[i] = free_pages[new_page_offset] * page_size
+            new_page_offset += 1
+
+
 @triton.jit
 def alloc_extend_kernel(
     pre_lens_ptr,
@@ -424,19 +439,6 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             (extend_num_tokens,), dtype=torch.int64, device=self.device
         )
 
-        alloc_extend_kernel[(bs,)](
-            prefix_lens,
-            seq_lens,
-            last_loc,
-            self.free_pages,
-            out_indices,
-            next_power_of_2(bs),
-            self.page_size,
-        )
-
-        if self.debug_mode:
-            assert len(torch.unique(out_indices)) == len(out_indices)
-
         num_new_pages = get_num_new_pages(
             seq_lens=seq_lens_cpu,
             page_size=self.page_size,
@@ -444,6 +446,30 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         )
         if num_new_pages > len(self.free_pages):
             return None
+
+        if str(self.device) == "cpu":
+            alloc_extend_naive(
+                prefix_lens_cpu.to(self.device),
+                seq_lens_cpu.to(self.device),
+                last_loc.to(self.device),
+                self.free_pages,
+                out_indices,
+                self.page_size,
+                self.device,
+            )
+        else:
+            alloc_extend_kernel[(bs,)](
+                prefix_lens,
+                seq_lens,
+                last_loc,
+                self.free_pages,
+                out_indices,
+                next_power_of_2(bs),
+                self.page_size,
+            )
+
+        if self.debug_mode:
+            assert len(torch.unique(out_indices)) == len(out_indices)
 
         self.free_pages = self.free_pages[num_new_pages:]
         return out_indices
@@ -464,18 +490,6 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             self.merge_and_sort_free()
 
         out_indices = torch.empty((bs,), dtype=torch.int64, device=self.device)
-        alloc_decode_kernel[(bs,)](
-            seq_lens,
-            last_loc,
-            self.free_pages,
-            out_indices,
-            next_power_of_2(bs),
-            self.page_size,
-        )
-
-        if self.debug_mode:
-            assert len(torch.unique(out_indices)) == len(out_indices)
-
         num_new_pages = get_num_new_pages(
             seq_lens=seq_lens_cpu,
             page_size=self.page_size,
@@ -483,6 +497,27 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         )
         if num_new_pages > len(self.free_pages):
             return None
+
+        if str(self.device) == "cpu":
+            alloc_decode_naive(
+                seq_lens_cpu.to(self.device),
+                last_loc.to(self.device),
+                self.free_pages,
+                out_indices,
+                self.page_size,
+            )
+        else:
+            alloc_decode_kernel[(bs,)](
+                seq_lens,
+                last_loc,
+                self.free_pages,
+                out_indices,
+                next_power_of_2(bs),
+                self.page_size,
+            )
+
+        if self.debug_mode:
+            assert len(torch.unique(out_indices)) == len(out_indices)
 
         self.free_pages = self.free_pages[num_new_pages:]
         return out_indices

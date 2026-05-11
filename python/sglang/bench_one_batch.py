@@ -531,46 +531,217 @@ class _MlxBenchRunner:
             trust_remote_code=server_args.trust_remote_code,
             disable_radix_cache=True,
             mem_fraction_static=server_args.mem_fraction_static,
+            page_size=server_args.page_size,
         )
         if server_args.max_total_tokens is not None:
             init_kwargs["pool_size"] = server_args.max_total_tokens
         self.mlx_runner = MlxModelRunner(**init_kwargs)
-        self.mlx_runner.init_kv_pool(req_to_token_pool=None)
         self.fake_torch_runner = model_runner
+        self.req_to_token_pool = model_runner.req_to_token_pool
+        self.token_to_kv_pool_allocator = model_runner.token_to_kv_pool_allocator
+        self.mlx_runner.init_kv_pool(req_to_token_pool=self.req_to_token_pool)
+        self._uses_scheduler_slots = not self.mlx_runner.disable_radix_cache
+        self._reqs = {}
+        self._reserved_slots = {}
+        self._synced_offsets = {}
 
     def clear(self):
         self.mlx_runner.clear()
+        if self._uses_scheduler_slots:
+            self.req_to_token_pool.clear()
+            self.token_to_kv_pool_allocator.clear()
+            for req in self._reqs.values():
+                req.req_pool_idx = None
+        self._reqs.clear()
+        self._reserved_slots.clear()
+        self._synced_offsets.clear()
+
+    def _ensure_req_pool_idx(self, req):
+        if req.req_pool_idx is None:
+            if self.req_to_token_pool.alloc([req]) is None:
+                raise RuntimeError("MLX benchmark request pool is full")
+        return int(req.req_pool_idx)
+
+    def _ensure_slot_capacity(self, req_id, required_len):
+        slots = self._reserved_slots.setdefault(req_id, [])
+        if len(slots) >= required_len:
+            return slots
+
+        page_size = max(
+            int(getattr(self.token_to_kv_pool_allocator, "page_size", 1)), 1
+        )
+        need_size = required_len - len(slots)
+        alloc_size = ((need_size + page_size - 1) // page_size) * page_size
+        new_slots = self.token_to_kv_pool_allocator.alloc(alloc_size)
+        if new_slots is None:
+            raise RuntimeError("MLX benchmark token pool is full")
+        slots.extend(int(slot) for slot in new_slots.tolist())
+        return slots
+
+    def _write_req_slots(self, req_pool_idx, start, slot_ids):
+        if not slot_ids:
+            return
+        values = torch.tensor(
+            slot_ids,
+            dtype=self.req_to_token_pool.req_to_token.dtype,
+            device=self.req_to_token_pool.req_to_token.device,
+        )
+        end = start + len(slot_ids)
+        self.req_to_token_pool.req_to_token[req_pool_idx, start:end] = values
+
+    @staticmethod
+    def _batch_req_ids(batch):
+        if hasattr(batch, "req_ids"):
+            return list(batch.req_ids)
+        return list(batch)
 
     def extend(self, reqs):
         req_ids = [str(req.rid) for req in reqs]
         results = []
-        for rid, req in zip(req_ids, reqs):
-            token_ids = [int(t) for t in req.fill_ids]
-            next_token = self.mlx_runner.prefill(
-                req_id=rid,
-                new_token_ids=token_ids,
-                full_token_ids=token_ids,
-                prefix_slot_ids=[],
-                new_slot_ids=[],
-                req_pool_idx=0,
-            )
-            results.append(next_token)
-        return torch.tensor(results), None, req_ids
+        if not self._uses_scheduler_slots:
+            all_new = all(not self.mlx_runner.has_request(rid) for rid in req_ids)
+            token_id_rows = [[int(t) for t in req.fill_ids] for req in reqs]
+            if (
+                all_new
+                and len(req_ids) > 1
+                and token_id_rows
+                and len({len(row) for row in token_id_rows}) == 1
+            ):
+                for rid, req in zip(req_ids, reqs, strict=True):
+                    self._reqs[rid] = req
+                next_tokens = self.mlx_runner.prefill_batch_no_radix(
+                    req_ids, token_id_rows
+                )
+                for rid, row in zip(req_ids, token_id_rows, strict=True):
+                    self._synced_offsets[rid] = len(row)
+                return torch.tensor(next_tokens), None, SimpleNamespace(req_ids=req_ids)
 
-    def decode(self, next_token_ids, req_ids):
-        next_token_ids = self.mlx_runner.decode_batch(req_ids)
+            for rid, req in zip(req_ids, reqs, strict=True):
+                self._reqs[rid] = req
+                token_ids = [int(t) for t in req.fill_ids]
+                if self.mlx_runner.has_request(rid):
+                    synced_offset = self._synced_offsets[rid]
+                    new_token_ids = token_ids[synced_offset:]
+                    if not new_token_ids:
+                        raise RuntimeError("MLX benchmark extend has no new tokens")
+                    next_token = self.mlx_runner.extend(rid, new_token_ids, [])
+                    self._synced_offsets[rid] = synced_offset + len(new_token_ids)
+                else:
+                    next_token = self.mlx_runner.prefill(
+                        req_id=rid,
+                        new_token_ids=token_ids,
+                        full_token_ids=token_ids,
+                        prefix_slot_ids=[],
+                        new_slot_ids=[],
+                        req_pool_idx=0,
+                    )
+                    self._synced_offsets[rid] = len(token_ids)
+                results.append(next_token)
+            return torch.tensor(results), None, SimpleNamespace(req_ids=req_ids)
+
+        for rid, req in zip(req_ids, reqs, strict=True):
+            self._reqs[rid] = req
+            token_ids = [int(t) for t in req.fill_ids]
+            if self.mlx_runner.has_request(rid):
+                synced_offset = self._synced_offsets[rid]
+                new_token_ids = token_ids[synced_offset:]
+                if not new_token_ids:
+                    raise RuntimeError("MLX benchmark extend has no new tokens")
+                required_len = synced_offset + len(new_token_ids)
+                req_pool_idx = int(self.mlx_runner._req_pool_idx[rid])
+                slots = self._ensure_slot_capacity(rid, required_len)
+                new_slot_ids = slots[synced_offset:required_len]
+                self._write_req_slots(req_pool_idx, synced_offset, new_slot_ids)
+                next_token = self.mlx_runner.extend(
+                    req_id=rid,
+                    new_token_ids=new_token_ids,
+                    new_slot_ids=new_slot_ids,
+                )
+                self._synced_offsets[rid] = required_len
+            else:
+                req_pool_idx = self._ensure_req_pool_idx(req)
+                slots = self._ensure_slot_capacity(rid, len(token_ids))
+                new_slot_ids = slots[: len(token_ids)]
+                self._write_req_slots(req_pool_idx, 0, new_slot_ids)
+                next_token = self.mlx_runner.prefill(
+                    req_id=rid,
+                    new_token_ids=token_ids,
+                    full_token_ids=token_ids,
+                    prefix_slot_ids=[],
+                    new_slot_ids=new_slot_ids,
+                    req_pool_idx=req_pool_idx,
+                )
+                self._synced_offsets[rid] = len(token_ids)
+            results.append(next_token)
+        return torch.tensor(results), None, SimpleNamespace(req_ids=req_ids)
+
+    def decode(self, next_token_ids, batch):
+        req_ids = self._batch_req_ids(batch)
+        if not self._uses_scheduler_slots:
+            next_token_ids = self.mlx_runner.decode_batch(req_ids)
+            for rid in req_ids:
+                self._synced_offsets[rid] = len(self.mlx_runner._req_token_ids[rid]) - 1
+            return torch.tensor(next_token_ids), None
+
+        decode_slot_ids = []
+        seq_lens = []
+        for rid in req_ids:
+            seq_len = len(self.mlx_runner._req_token_ids[rid]) - 1
+            req_pool_idx = int(self.mlx_runner._req_pool_idx[rid])
+            slots = self._ensure_slot_capacity(rid, seq_len + 1)
+            decode_slot_id = slots[seq_len]
+            self._write_req_slots(req_pool_idx, seq_len, [decode_slot_id])
+            decode_slot_ids.append(decode_slot_id)
+            seq_lens.append(seq_len)
+        next_token_ids = self.mlx_runner.decode_batch(req_ids, decode_slot_ids)
+        for rid, seq_len in zip(req_ids, seq_lens, strict=True):
+            self._synced_offsets[rid] = seq_len + 1
         return torch.tensor(next_token_ids), None
 
     def cleanup(self, batch):
-        if isinstance(batch, list):
-            for req_id in batch:
-                self.mlx_runner.remove_request(req_id)
+        for req_id in self._batch_req_ids(batch):
+            self.mlx_runner.remove_request(req_id)
+            if not self._uses_scheduler_slots:
+                self._reqs.pop(req_id, None)
+                self._synced_offsets.pop(req_id, None)
+                continue
+            slots = self._reserved_slots.pop(req_id, None)
+            if slots:
+                free_slots = torch.tensor(
+                    slots,
+                    dtype=torch.int64,
+                    device=self.token_to_kv_pool_allocator.device,
+                )
+                self.token_to_kv_pool_allocator.free(free_slots)
+            req = self._reqs.pop(req_id, None)
+            if req is not None and req.req_pool_idx is not None:
+                self.req_to_token_pool.free(req)
+            self._synced_offsets.pop(req_id, None)
 
     def synchronize(self):
         pass
 
     def max_batch_size(self, input_len, output_len):
-        return self.fake_torch_runner.max_total_num_tokens // (input_len + output_len)
+        required_len = input_len + output_len
+        if required_len <= 0:
+            return 0
+        if not self._uses_scheduler_slots:
+            return self.fake_torch_runner.max_total_num_tokens // required_len
+
+        max_context_len = self.req_to_token_pool.req_to_token.shape[1]
+        if required_len > max_context_len:
+            return 0
+
+        page_size = max(
+            int(getattr(self.token_to_kv_pool_allocator, "page_size", 1)), 1
+        )
+        rounded_required_len = ((required_len + page_size - 1) // page_size) * page_size
+        token_capacity = (
+            self.token_to_kv_pool_allocator.available_size() // rounded_required_len
+        )
+        mlx_capacity = self.mlx_runner.pool_size // required_len
+        request_capacity = self.req_to_token_pool.size
+        return min(mlx_capacity, token_capacity, request_capacity)
 
 
 def _read_prompts_from_file(prompt_file, rank_print):

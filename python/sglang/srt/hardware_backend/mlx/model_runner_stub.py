@@ -9,11 +9,33 @@ from typing import Tuple
 
 import torch
 
-from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
+from sglang.srt.mem_cache.allocator import (
+    PagedTokenToKVPoolAllocator,
+    TokenToKVPoolAllocator,
+)
 from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
 from sglang.srt.model_executor.model_runner import ModelRunner
 
 logger = logging.getLogger(__name__)
+
+
+def _align_pool_size_to_pages(pool_size: int, page_size: int) -> int:
+    pool_size = int(pool_size)
+    page_size = int(page_size)
+    if page_size <= 1:
+        return pool_size
+    if pool_size < page_size:
+        aligned = page_size
+    else:
+        aligned = pool_size - (pool_size % page_size)
+    if aligned != pool_size:
+        logger.info(
+            "Aligning MLX stub max_total_num_tokens from %s to %s for page_size=%s",
+            pool_size,
+            aligned,
+            page_size,
+        )
+    return aligned
 
 
 class _DummyKVCache(KVCache):
@@ -24,11 +46,11 @@ class _DummyKVCache(KVCache):
     its own KV cache internally.
     """
 
-    def __init__(self, size: int, dtype: torch.dtype, device: str):
+    def __init__(self, size: int, dtype: torch.dtype, device: str, page_size: int = 1):
         # Bypass KVCache.__init__ to avoid custom_mem_pool / memory_saver
         # initialization that may touch CUDA APIs.
         self.size = size
-        self.page_size = 1
+        self.page_size = page_size
         self.dtype = dtype
         self.store_dtype = dtype
         self.device = device
@@ -74,8 +96,18 @@ class MlxModelRunnerStub(ModelRunner):
     the minimal bookkeeping pools needed by the scheduler are created.
     """
 
-    def __init__(self, *args, mlx_pool_size: int | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        mlx_pool_size: int | None = None,
+        mlx_page_size: int | None = None,
+        **kwargs,
+    ):
         self._mlx_pool_size = mlx_pool_size
+        if mlx_page_size is None:
+            server_args = kwargs.get("server_args")
+            mlx_page_size = getattr(server_args, "page_size", 1)
+        self._mlx_page_size = int(mlx_page_size or 1)
         super().__init__(*args, **kwargs)
 
     def load_model(self):
@@ -134,6 +166,9 @@ class MlxModelRunnerStub(ModelRunner):
             self.max_total_num_tokens = self._mlx_pool_size
         else:
             self.max_total_num_tokens = self.model_config.context_len
+        self.max_total_num_tokens = _align_pool_size_to_pages(
+            self.max_total_num_tokens, self._mlx_page_size
+        )
         self.max_running_requests = min(
             self.max_total_num_tokens // 2,
             4096,
@@ -152,15 +187,26 @@ class MlxModelRunnerStub(ModelRunner):
             size=self.max_total_num_tokens,
             dtype=self.kv_cache_dtype,
             device="cpu",
+            page_size=self._mlx_page_size,
         )
         self.token_to_kv_pool = dummy_kv
-        self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
-            size=self.max_total_num_tokens,
-            dtype=self.kv_cache_dtype,
-            device="cpu",
-            kvcache=dummy_kv,
-            need_sort=False,
-        )
+        if self._mlx_page_size == 1:
+            self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
+                size=self.max_total_num_tokens,
+                dtype=self.kv_cache_dtype,
+                device="cpu",
+                kvcache=dummy_kv,
+                need_sort=False,
+            )
+        else:
+            self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
+                size=self.max_total_num_tokens,
+                page_size=self._mlx_page_size,
+                dtype=self.kv_cache_dtype,
+                device="cpu",
+                kvcache=dummy_kv,
+                need_sort=False,
+            )
 
         # No CUDA graphs, no attention backend
         self.graph_runner = None
