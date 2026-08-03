@@ -109,10 +109,10 @@ def get_last_loc(
     prefix_lens_tensor: torch.Tensor,
 ) -> torch.Tensor:
     prefill_backend, decode_backend = attention_backends()
-    uses_triton_dispatch = prefill_backend not in (
-        "ascend",
-        "torch_native",
-    ) and decode_backend not in ("ascend", "torch_native")
+    uses_triton_dispatch = all(
+        backend != "ascend" and support_triton(backend)
+        for backend in (prefill_backend, decode_backend)
+    )
 
     if _is_hip and uses_triton_dispatch:
         # HIP-only: the legacy get_last_loc_triton kernel emits a

@@ -5,7 +5,8 @@ pure-``torch`` reference (``forward_native``) plus optimized per-device backends
 all behind one signature. The public module-level functions are thin wrappers
 over module-level instances; auto-selection follows the production default for
 the live device: AOT ``sgl_kernel`` on CUDA, ``aiter`` (or rocm-triton for
-gemma) on ROCm, ``torch_npu`` on Ascend, native reference otherwise.
+gemma) on ROCm, ``torch_npu`` on Ascend, Metal JIT for its narrow MPS contract,
+and native reference otherwise.
 Pick a specific backend with e.g.
 ``_RMSNORM.forward(x, w, backend=KernelBackend.JIT)`` or globally via
 ``SGLANG_FORCE_FUSED_OP_BACKEND``.
@@ -29,6 +30,7 @@ _NORM_DTYPES = ("float16", "bfloat16")
 _CUDA = frozenset({CapabilityRequirement.CUDA})
 _HIP = frozenset({CapabilityRequirement.HIP})
 _NPU = frozenset({CapabilityRequirement.NPU})
+_MPS = frozenset({CapabilityRequirement.MPS})
 # Unlike the gated-activation ops, sgl_kernel does *not* build the rmsnorm ops
 # for ROCm (production: ``if _is_cuda or _is_xpu or _is_musa: from sgl_kernel
 # import rmsnorm`` — HIP is absent), so AOT here is CUDA-only. ROCm instead has
@@ -40,6 +42,7 @@ _NPU = frozenset({CapabilityRequirement.NPU})
 _NORM_PRIORITY = (
     KernelBackend.AOT,
     KernelBackend.JIT,
+    KernelBackend.METAL_JIT,
     KernelBackend.AITER,
     KernelBackend.TORCH_NPU,
     KernelBackend.TORCH,
@@ -57,6 +60,7 @@ class RMSNormOp(BaseFusedOp):
     capabilities = {
         KernelBackend.AOT: _CUDA,
         KernelBackend.JIT: _CUDA,
+        KernelBackend.METAL_JIT: _MPS,
         KernelBackend.AITER: _HIP,
         KernelBackend.TORCH_NPU: _NPU,
     }
@@ -67,6 +71,9 @@ class RMSNormOp(BaseFusedOp):
     descriptions = {
         KernelBackend.AOT: "RMS normalization (sgl_kernel wheel).",
         KernelBackend.JIT: "RMS normalization (sglang.kernels.jit).",
+        KernelBackend.METAL_JIT: (
+            "RMS normalization (torch.mps.compile_shader, Apple Metal)."
+        ),
         KernelBackend.AITER: "RMS normalization (aiter rmsnorm2d_fwd, ROCm).",
         KernelBackend.TORCH_NPU: "RMS normalization (torch_npu, Ascend).",
         KernelBackend.TORCH: "RMS normalization (pure-torch reference).",
@@ -82,6 +89,10 @@ class RMSNormOp(BaseFusedOp):
     ) -> torch.Tensor:
         import torch
 
+        # Keep the explicit FP32 reduction on every device. Torch 2.13's
+        # fused MPS implementation is faster in isolation, but its rounding
+        # changes Qwen3-0.6B greedy decode after a 512-token prefill while this
+        # reference path agrees with both the Metal kernel and whole-model MLX.
         x = input.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + eps)
@@ -90,6 +101,32 @@ class RMSNormOp(BaseFusedOp):
             return result
         out.copy_(result)
         return out
+
+    def backend_eligible(
+        self,
+        backend: KernelBackend,
+        input: Optional[torch.Tensor] = None,
+        weight: Optional[torch.Tensor] = None,
+        eps: float = 1e-6,
+        out: Optional[torch.Tensor] = None,
+        enable_pdl: Optional[bool] = None,
+    ) -> bool:
+        if not super().backend_eligible(backend, input, weight, eps, out, enable_pdl):
+            return False
+        if backend is not KernelBackend.METAL_JIT:
+            return True
+        if enable_pdl not in (None, False):
+            return False
+        # Argument-free resolution is used by metadata/registry diagnostics.
+        if input is None and weight is None:
+            return True
+        if input is None or weight is None:
+            return False
+        from sglang.kernels.ops.layernorm._rmsnorm_metal_jit import (
+            can_use_mps_rmsnorm,
+        )
+
+        return can_use_mps_rmsnorm(input, weight, eps, out=out)
 
     def forward_aot(
         self,
@@ -119,6 +156,20 @@ class RMSNormOp(BaseFusedOp):
             out = torch.empty_like(input)
         jit_rmsnorm(input, weight, out, eps)
         return out
+
+    def forward_metal_jit(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float = 1e-6,
+        out: Optional[torch.Tensor] = None,
+        enable_pdl: Optional[bool] = None,
+    ) -> torch.Tensor:
+        from sglang.kernels.ops.layernorm._rmsnorm_metal_jit import mps_rmsnorm
+
+        if enable_pdl not in (None, False):
+            raise RuntimeError("MPS RMSNorm does not support enable_pdl")
+        return mps_rmsnorm(input, weight, eps, out=out)
 
     def forward_aiter(
         self,
@@ -167,6 +218,7 @@ class FusedAddRMSNormOp(BaseFusedOp):
     capabilities = {
         KernelBackend.AOT: _CUDA,
         KernelBackend.JIT: _CUDA,
+        KernelBackend.METAL_JIT: _MPS,
         KernelBackend.AITER: _HIP,
         KernelBackend.TORCH_NPU: _NPU,
     }
@@ -181,6 +233,10 @@ class FusedAddRMSNormOp(BaseFusedOp):
         ),
         KernelBackend.JIT: (
             "Fused residual-add + RMS normalization (sglang.kernels.jit)."
+        ),
+        KernelBackend.METAL_JIT: (
+            "Fused residual-add + RMS normalization "
+            "(torch.mps.compile_shader, Apple Metal)."
         ),
         KernelBackend.AITER: ("Fused residual-add + RMS normalization (aiter, ROCm)."),
         KernelBackend.TORCH_NPU: (
@@ -207,6 +263,34 @@ class FusedAddRMSNormOp(BaseFusedOp):
         normed = acc * torch.rsqrt(variance + eps)
         input.copy_((normed * weight).to(input.dtype))
 
+    def backend_eligible(
+        self,
+        backend: KernelBackend,
+        input: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        weight: Optional[torch.Tensor] = None,
+        eps: float = 1e-6,
+        enable_pdl: Optional[bool] = None,
+    ) -> bool:
+        if not super().backend_eligible(
+            backend, input, residual, weight, eps, enable_pdl
+        ):
+            return False
+        if backend is not KernelBackend.METAL_JIT:
+            return True
+        if enable_pdl not in (None, False):
+            return False
+        # Argument-free resolution is used by metadata/registry diagnostics.
+        if input is None and residual is None and weight is None:
+            return True
+        if input is None or residual is None or weight is None:
+            return False
+        from sglang.kernels.ops.layernorm._rmsnorm_metal_jit import (
+            can_use_mps_fused_add_rmsnorm,
+        )
+
+        return can_use_mps_fused_add_rmsnorm(input, residual, weight, eps)
+
     def forward_aot(
         self,
         input: torch.Tensor,
@@ -232,6 +316,22 @@ class FusedAddRMSNormOp(BaseFusedOp):
         )
 
         return jit_fused_add_rmsnorm(input, residual, weight, eps)
+
+    def forward_metal_jit(
+        self,
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float = 1e-6,
+        enable_pdl: Optional[bool] = None,
+    ) -> None:
+        from sglang.kernels.ops.layernorm._rmsnorm_metal_jit import (
+            mps_fused_add_rmsnorm,
+        )
+
+        if enable_pdl not in (None, False):
+            raise RuntimeError("MPS fused-add RMSNorm does not support enable_pdl")
+        return mps_fused_add_rmsnorm(input, residual, weight, eps)
 
     def forward_aiter(
         self,

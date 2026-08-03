@@ -96,6 +96,7 @@ from sglang.srt.model_executor.cuda_graph_config import (
 from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     PPProxyTensors,
+    precomputed_greedy_fallback_reason,
 )
 from sglang.srt.model_executor.forward_context import (
     ForwardContext,
@@ -239,7 +240,7 @@ if _is_npu:
     from sglang.srt.hardware_backend.npu.utils import init_npu_backend
 
     init_npu_backend()
-elif current_platform.is_out_of_tree():
+elif current_platform.is_mps() or current_platform.is_out_of_tree():
     current_platform.init_backend()
 
 # Detect stragger ranks in model loading
@@ -304,6 +305,16 @@ class ModelRunner:
     def supports_sampling_observer(self) -> bool:
         """Whether this runner's sampling path publishes observer output."""
         return self.server_args.dllm_algorithm is None and self.spec_algorithm.is_none()
+
+    def _prepare_sampling_observer_state(self, forward_batch: ForwardBatch) -> None:
+        """Resolve observer eligibility before model providers choose an output path."""
+        observer = self.sampling_observer
+        sampling_info = getattr(forward_batch, "sampling_info", None)
+        forward_batch.sampling_observer_active = bool(
+            observer is not None
+            and sampling_info is not None
+            and observer.is_active(sampling_info)
+        )
 
     def __init__(
         self,
@@ -377,6 +388,13 @@ class ModelRunner:
         self.draft_model_idx = draft_model_idx
         self.enable_hisparse = get_memory().enable_hisparse
         self._sampling_observer: Optional[SamplingObserver] = None
+        # A platform may install model-specific semantic operators after the
+        # standard Torch model and KV pools exist.  The plan owns only custom
+        # operator state; ModelRunner remains authoritative for model, cache,
+        # scheduler, and request lifecycles.
+        self.platform_operator_plan = None
+        self._platform_forward_lock = None
+        self._platform_memory_pool_allocation_started = False
 
         self.init_startup_observability()
 
@@ -406,8 +424,14 @@ class ModelRunner:
 
         # Set device early so that TransferEngine init (e.g. Ascend NPU)
         # can access the device context.
+        platform_matches_device = (
+            str(self.device).split(":", 1)[0] == current_platform.device_type
+        )
         try:
-            torch.get_device_module(self.device).set_device(ps.gpu_id)
+            if platform_matches_device:
+                current_platform.set_device(current_platform.get_device(ps.gpu_id))
+            else:
+                torch.get_device_module(self.device).set_device(ps.gpu_id)
         except Exception:
             import os
 
@@ -426,7 +450,11 @@ class ModelRunner:
         self.init_torch_distributed()
 
         # Init forward stream for overlap schedule
-        self.forward_stream = torch.get_device_module(self.device).Stream()
+        self.forward_stream = (
+            current_platform.create_stream(current_platform.get_device(ps.gpu_id))
+            if platform_matches_device
+            else torch.get_device_module(self.device).Stream()
+        )
 
         # Read-done mailbox: the scheduler's WAR barrier reads it from the runner
         # its worker names, and treats None as the coarse whole-forward fence.
@@ -652,6 +680,7 @@ class ModelRunner:
         self.maybe_init_elastic_ep()
         self.init_token_oracle()
         self.sampler = create_sampler()
+
         self.load_model()
         prepare_moe_topk(
             model=self.model,
@@ -685,6 +714,19 @@ class ModelRunner:
         self.maybe_init_lora_manager()
         self.maybe_enable_batch_invariant_mode()
         self.configure_kv_cache_dtype()
+
+    def _bind_platform_runtime_operators(self, model: torch.nn.Module):
+        """Bind platform providers against the allocated Torch KV pool."""
+        if str(self.device).split(":", 1)[0] != current_platform.device_type:
+            return None
+
+        return current_platform.bind_model_runtime_operators(
+            model=model,
+            model_config=self.model_config,
+            server_args=self.server_args,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool=self.token_to_kv_pool,
+        )
 
     def init_memory_saver_adapter(self):
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -824,6 +866,19 @@ class ModelRunner:
 
     def alloc_memory_pool(self, memory_pool_config: Optional[MemoryPoolConfig] = None):
         """Allocate KV cache memory pools only (no backends or cuda graphs)."""
+        runner_device_type = str(self.device).split(":", 1)[0]
+        if (
+            runner_device_type == current_platform.device_type
+            and not current_platform.supports_memory_pool_reallocation()
+        ):
+            if getattr(self, "_platform_memory_pool_allocation_started", False):
+                raise RuntimeError(
+                    f"{current_platform.device_type} memory-pool allocation is "
+                    "one-shot because platform operators borrow the pool storage; "
+                    "construct a new ModelRunner instead of replacing a live pool"
+                )
+            self._platform_memory_pool_allocation_started = True
+
         if memory_pool_config is not None:
             self.memory_pool_config = memory_pool_config
 
@@ -842,6 +897,15 @@ class ModelRunner:
             self.swa_max_total_num_tokens = result.swa_max_total_num_tokens
         # Keep a reference so the shared byte buffer is not GC'd.
         self._unified_memory_pool = result.unified_memory_pool
+
+        # The model and concrete KV storage now both exist.  Validate NHD,
+        # dtype, shape, pointer identity, and every layer before publishing a
+        # provider.  This turns unsupported HND/page-major pools into a startup
+        # fallback/error instead of a first-request memory-layout failure.
+        self.platform_operator_plan = self._bind_platform_runtime_operators(self.model)
+        self._platform_forward_lock = getattr(
+            self.platform_operator_plan, "forward_lock", None
+        )
 
         self._init_post_memory_pool_components()
 
@@ -1513,6 +1577,22 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         forward_count: int = 1,
     ) -> LogitsProcessorOutput:
+        lock = getattr(self, "_platform_forward_lock", None)
+        if lock is None:
+            return self._forward_split_prefill_unlocked(
+                forward_batch, reinit_attn_backend, forward_count
+            )
+        with lock:
+            return self._forward_split_prefill_unlocked(
+                forward_batch, reinit_attn_backend, forward_count
+            )
+
+    def _forward_split_prefill_unlocked(
+        self,
+        forward_batch: ForwardBatch,
+        reinit_attn_backend: bool = False,
+        forward_count: int = 1,
+    ) -> LogitsProcessorOutput:
         if forward_batch.split_index == 0 or reinit_attn_backend:
             self.attn_backend.init_forward_metadata(forward_batch)
         next_split_index = min(
@@ -1539,6 +1619,12 @@ class ModelRunner:
     ) -> ModelRunnerOutput:
         # Deprecated kwarg: pre-planners mark the batch themselves now.
         forward_batch.apply_deprecated_skip_attn_backend_init(skip_attn_backend_init)
+
+        # Providers decide whether they may bypass logits and sampling during
+        # model.forward. Resolve the invocation-scoped observer state before
+        # any provider can make that decision, and carry it through ForwardBatch
+        # copies made by eager/graph runners.
+        self._prepare_sampling_observer_state(forward_batch)
 
         self.forward_pass_id += 1
 
@@ -1680,11 +1766,36 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> ModelRunnerOutput:
+        """Run one model forward under its platform operator lock, if any."""
+        lock = getattr(self, "_platform_forward_lock", None)
+        if lock is None:
+            return self._forward_raw_unlocked(
+                forward_batch,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
+        with lock:
+            return self._forward_raw_unlocked(
+                forward_batch,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
+
+    def _forward_raw_unlocked(
+        self,
+        forward_batch: ForwardBatch,
+        pp_proxy_tensors: Optional[PPProxyTensors],
+        reinit_attn_backend: bool = False,
+        split_forward_count: int = 1,
+    ) -> ModelRunnerOutput:
         if has_forward_context():
             ctx_mgr = contextlib.nullcontext()
         else:
             ctx_mgr = forward_context(ForwardContext(attn_backend=self.attn_backend))
         with ctx_mgr:
+            decode_graph_runner = self.decode_cuda_graph_runner
             mode_check = (
                 forward_batch.forward_mode.is_cpu_graph
                 if self.device == "cpu"
@@ -1692,8 +1803,8 @@ class ModelRunner:
             )
             can_run_graph = bool(
                 mode_check()
-                and self.decode_cuda_graph_runner
-                and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
+                and decode_graph_runner
+                and decode_graph_runner.can_run_graph(forward_batch)
             )
 
             if (
@@ -1704,9 +1815,9 @@ class ModelRunner:
                 self.hisparse_coordinator.wait_for_pending_backup()
                 self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
 
-            # Replay cuda graph if applicable
+            # Replay the active platform decode graph if applicable.
             if can_run_graph:
-                ret = self.decode_cuda_graph_runner.execute(
+                ret = decode_graph_runner.execute(
                     forward_batch,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
@@ -1819,38 +1930,69 @@ class ModelRunner:
         # runners may reuse backing objects. Never leak an auxiliary result from
         # a previous replay into a request with no observer state.
         logits_output.auxiliary_device_output = None
-        observer = self.sampling_observer
-        # Preserve two-argument overrides when observation is inactive.
-        if observer is not None and observer.is_active(forward_batch.sampling_info):
-            observer_state = self._preprocess_logits(
+        precomputed = logits_output.precomputed_greedy_token_ids
+        if precomputed is not None:
+            if logits_output.next_token_logits is not None:
+                raise RuntimeError(
+                    "model output contained both logits and precomputed greedy tokens"
+                )
+            reason = precomputed_greedy_fallback_reason(
+                forward_batch,
+                sampling_observer=self.sampling_observer,
+            )
+            if reason is not None:
+                raise RuntimeError(
+                    "model returned precomputed greedy tokens for an ineligible "
+                    f"batch: {reason}"
+                )
+            next_token_ids = self.sampler.finalize_precomputed_greedy_token_ids(
+                precomputed,
+                forward_batch.sampling_info,
+                batch_size=forward_batch.batch_size,
+            )
+            # This field is a one-shot model-to-sampler payload.  The returned
+            # token tensor now owns the downstream lifetime; retaining the same
+            # DLPack-backed tensor on logits_output would keep the MLX producer
+            # storage alive through result queues for no semantic benefit.
+            logits_output.precomputed_greedy_token_ids = None
+        else:
+            observer = self.sampling_observer
+            observer_active = getattr(forward_batch, "sampling_observer_active", None)
+            if observer_active is None:
+                observer_active = observer is not None and observer.is_active(
+                    forward_batch.sampling_info
+                )
+            # Preserve two-argument overrides when observation is inactive.
+            if observer is not None and observer_active:
+                observer_state = self._preprocess_logits(
+                    logits_output,
+                    forward_batch.sampling_info,
+                    observer=observer,
+                )
+            else:
+                observer_state = self._preprocess_logits(
+                    logits_output, forward_batch.sampling_info
+                )
+
+            # Sample the next tokens
+            next_token_ids = self.sampler(
                 logits_output,
                 forward_batch.sampling_info,
-                observer=observer,
+                forward_batch.return_logprob,
+                forward_batch.top_logprobs_nums,
+                forward_batch.token_ids_logprobs,
+                # For prefill, we only use the position of the last token.
+                (
+                    forward_batch.positions
+                    if forward_batch.forward_mode.is_decode()
+                    else forward_batch.seq_lens - 1
+                ),
             )
-        else:
-            observer_state = self._preprocess_logits(
-                logits_output, forward_batch.sampling_info
-            )
-
-        # Sample the next tokens
-        next_token_ids = self.sampler(
-            logits_output,
-            forward_batch.sampling_info,
-            forward_batch.return_logprob,
-            forward_batch.top_logprobs_nums,
-            forward_batch.token_ids_logprobs,
-            # For prefill, we only use the position of the last token.
-            (
-                forward_batch.positions
-                if forward_batch.forward_mode.is_decode()
-                else forward_batch.seq_lens - 1
-            ),
-        )
-        if observer_state is not None:
-            logits_output.auxiliary_device_output = observer.after_sample(
-                observer_state,
-                next_token_ids,
-            )
+            if observer_state is not None:
+                logits_output.auxiliary_device_output = observer.after_sample(
+                    observer_state,
+                    next_token_ids,
+                )
         self.ngram_embedding_manager.update_after_decode(
             next_token_ids=next_token_ids,
             forward_batch=forward_batch,
@@ -2153,13 +2295,121 @@ class ModelRunner:
         load_format: str,
         load_config: LoadConfig,
     ) -> None:
-        self.model = new_model
-        # The record says what model this PROCESS serves; a draft's weight
-        # update is not that (its own state is on the runner).
-        if not self.is_draft_worker:
-            get_context().override(
-                "model_runner.update_model_fields",
-                model_path=model_path,
-                load_format=load_format,
-            )
-        self.load_config = load_config
+        """Publish a replacement Torch model and its platform operator plan.
+
+        Online loaders usually mutate the existing module; in that case the
+        WeightUpdater invalidates borrowed custom-op views after the mutation.
+        A loader that returns a new module receives a fully prepared platform
+        plan before the serving model is switched.
+        """
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            model_replaced = new_model is not self.model
+            old_plan = getattr(self, "platform_operator_plan", None)
+            runtime_context = get_context()
+            if not self.is_draft_worker:
+                resolved_args = runtime_context.resolved_server_args_dict()
+                old_model_path = resolved_args.get("model_path")
+                old_load_format = resolved_args.get("load_format")
+
+            if not model_replaced:
+                # The process-level record describes the served target model,
+                # not the colocated speculative draft runner.
+                if not self.is_draft_worker:
+                    runtime_context.override(
+                        "model_runner.update_model_fields",
+                        model_path=model_path,
+                        load_format=load_format,
+                    )
+                self.model = new_model
+                self.load_config = load_config
+                return
+
+            # Validate the generic config publication while the old optimized
+            # plan is still intact. Then retire it before compiling the new
+            # provider so a 16 GB unified-memory machine never retains two MLX
+            # executable/borrow sets during an online replacement.
+            if not self.is_draft_worker:
+                runtime_context.override(
+                    "model_runner.update_model_fields",
+                    model_path=model_path,
+                    load_format=load_format,
+                )
+            close_old_plan = getattr(old_plan, "close", None)
+            try:
+                if callable(close_old_plan):
+                    close_old_plan()
+                self.platform_operator_plan = None
+                new_plan = self._bind_platform_runtime_operators(new_model)
+                new_lock = getattr(new_plan, "forward_lock", None)
+                if lock is not None and new_lock is not lock:
+                    close_new_plan = getattr(new_plan, "close", None)
+                    if callable(close_new_plan):
+                        close_new_plan()
+                    raise RuntimeError(
+                        "a replacement platform operator plan changed the "
+                        "runner's serving lock identity"
+                    )
+            except Exception:
+                if not self.is_draft_worker:
+                    try:
+                        runtime_context.override(
+                            "model_runner.update_model_fields.rollback",
+                            model_path=old_model_path,
+                            load_format=old_load_format,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to roll back server arguments after a model "
+                            "replacement failed"
+                        )
+                # The old model remains published with its optimized hooks
+                # cleared by old_plan.close(), so it stays correct through the
+                # ordinary Torch path even though the replacement failed.
+                raise
+
+            # All fallible preparation is complete. Publish the Torch model and
+            # the custom-op plan together while forward/update serialization is
+            # still held.
+            self.model = new_model
+            self.load_config = load_config
+            self.platform_operator_plan = new_plan
+            self._platform_forward_lock = new_lock
+
+    def invalidate_platform_operator_views(self) -> None:
+        """Drop borrowed custom-op views after a Torch weight mutation."""
+        plan = getattr(self, "platform_operator_plan", None)
+        invalidate = getattr(plan, "invalidate_views", None)
+        if not callable(invalidate):
+            return
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            invalidate()
+
+    def close_platform_operators(self) -> None:
+        """Release platform custom-op state before model/cache teardown."""
+        plan = getattr(self, "platform_operator_plan", None)
+        close = getattr(plan, "close", None)
+        if not callable(close):
+            return
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            close()
+
+    def get_platform_operator_state(self) -> Optional[dict]:
+        """Return the automatically selected platform operator implementations."""
+        plan = getattr(self, "platform_operator_plan", None)
+        if plan is None:
+            return None
+        get_state = getattr(plan, "get_state", None)
+        if callable(get_state):
+            return get_state()
+        return {
+            "enabled": bool(getattr(plan, "enabled", False)),
+            "model": getattr(plan, "model", None),
+            "attention_backend": getattr(plan, "attention_backend", "torch"),
+            "fallback_reason": getattr(plan, "fallback_reason", None),
+        }

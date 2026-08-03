@@ -524,7 +524,9 @@ def get_available_gpu_memory(
             free_gpu_memory = psutil.virtual_memory().available
         free_gpu_memory, total_gpu_memory = torch.musa.mem_get_info()
     elif device == "mps":
-        free_gpu_memory = psutil.virtual_memory().available
+        if empty_cache:
+            current_platform.empty_cache()
+        free_gpu_memory, _ = current_platform.get_available_memory(gpu_id)
     else:
         if not current_platform.is_out_of_tree():
             raise ValueError(
@@ -821,6 +823,11 @@ def get_device_memory_capacity(device: str = None):
         if mem_bytes:
             return mem_bytes / (1 << 20)  # bytes -> MiB
         return None
+    if current_platform.is_mps() and (
+        device is None or str(device).split(":", 1)[0] == "mps"
+    ):
+        mem_bytes = current_platform.get_device_total_memory()
+        return mem_bytes / (1 << 20) if mem_bytes else None
     if is_cuda():
         gpu_mem = get_nvgpu_memory_capacity()
     elif is_hip():
@@ -843,6 +850,9 @@ def get_device_memory_capacity(device: str = None):
 
 
 def get_device_name(device_id: int = 0) -> str:
+    if current_platform.is_mps():
+        return current_platform.get_device_name(device_id)
+
     if (hasattr(torch, "cuda") and torch.cuda.is_available()) or is_musa():
         return torch.cuda.get_device_name(device_id)
 
@@ -918,9 +928,7 @@ def get_device(device_id: Optional[int] = None) -> str:
         return "musa:{}".format(device_id)
 
     if is_mps():
-        if device_id is None:
-            return "mps"
-        return "mps:{}".format(device_id)
+        return str(current_platform.get_device(0 if device_id is None else device_id))
 
     try:
         return current_platform.get_device(device_id)
@@ -932,6 +940,9 @@ def get_device(device_id: Optional[int] = None) -> str:
 
 @lru_cache(maxsize=1)
 def get_device_count() -> int:
+    if current_platform.is_mps():
+        return current_platform.get_device_count()
+
     if (hasattr(torch, "cuda") and torch.cuda.is_available()) or is_musa():
         try:
             return torch.cuda.device_count()
@@ -957,6 +968,9 @@ def get_device_count() -> int:
 
 
 def get_device_core_count(device_id: int = 0) -> int:
+    if current_platform.is_mps():
+        return current_platform.get_device_core_count(device_id)
+
     if (hasattr(torch, "cuda") and torch.cuda.is_available()) or is_musa():
         return torch.cuda.get_device_properties(device_id).multi_processor_count
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -967,6 +981,12 @@ def get_device_core_count(device_id: int = 0) -> int:
 
 def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
     major, minor = None, None
+    if current_platform.is_mps():
+        capability = current_platform.get_device_capability(device_id)
+        if capability is not None:
+            major, minor = capability
+        return major, minor
+
     if (hasattr(torch, "cuda") and torch.cuda.is_available()) or is_musa():
         major, minor = torch.cuda.get_device_capability(device_id)
 
@@ -993,7 +1013,7 @@ def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
 
 def get_compiler_backend(mode=None) -> str:
     # OOT platforms provide their own compile backend.
-    if current_platform.is_out_of_tree():
+    if current_platform.is_out_of_tree() or current_platform.is_mps():
         return current_platform.get_compile_backend(mode)
 
     if hasattr(torch, "hpu") and torch.hpu.is_available():
@@ -1305,7 +1325,7 @@ def temp_set_env(*, allow_sglang: bool = False, **env_vars: Any):
 
 
 def support_triton(backend: str) -> bool:
-    return backend not in ["torch_native", "intel_amx"]
+    return backend not in ["torch_native", "intel_amx", "mps"]
 
 
 _ENABLE_TORCH_INFERENCE_MODE = get_bool_env_var(
@@ -1436,7 +1456,6 @@ def calculate_time(show=False, min_cost_ms=0.0):
 
 
 class LayerFn(Protocol):
-
     def __call__(self, idx: int, prefix: str) -> torch.nn.Module: ...
 
 
@@ -3125,9 +3144,9 @@ def kill_itself_when_parent_died():
         libc = ctypes.CDLL("libc.so.6")
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
     elif sys.platform == "darwin":
-        # macOS has no PR_SET_PDEATHSIG equivalent; the MLX backend provides a
-        # kqueue-based watchdog that SIGKILLs this worker once it is orphaned.
-        from sglang.srt.hardware_backend.mlx.parent_watchdog import (
+        # macOS has no PR_SET_PDEATHSIG equivalent; use the kqueue-based
+        # watchdog to SIGKILL this worker once it is orphaned.
+        from sglang.srt.hardware_backend.mps.parent_watchdog import (
             start_parent_death_watcher,
         )
 
@@ -4039,7 +4058,7 @@ def configure_gc_logger():
             logger.info(
                 f"GC end: Time {time.time()} | Generation {gen} | "
                 f"Duration: {duration:.4f}s | Collected: {collected} | Uncollectable: {uncollectable} "
-                f'{"(LONG GC)" if duration > 0.1 else ""}'
+                f"{'(LONG GC)' if duration > 0.1 else ''}"
             )
 
     gc.callbacks.append(gc_callback)

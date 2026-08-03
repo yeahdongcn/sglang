@@ -11,7 +11,7 @@ from sglang.srt.distributed import (
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
-from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
@@ -30,8 +30,7 @@ from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
-from sglang.srt.models.qwen2 import Qwen2Model
+from sglang.srt.models.qwen2 import Qwen2MLP, Qwen2Model
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.runtime_context import get_exec, get_parallel, get_stream
 from sglang.srt.utils import add_prefix, get_bool_env_var, is_cuda, is_hip, is_npu
@@ -58,6 +57,10 @@ if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
 
     from sglang.srt.hardware_backend.npu.cmo import get_cmo_stream, wait_cmo_stream
+
+
+class Qwen3MLP(Qwen2MLP):
+    pass
 
 
 class Qwen3Attention(nn.Module):
@@ -155,6 +158,10 @@ class Qwen3Attention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
         self.alt_stream = alt_stream
+        # Bound once by the Qwen3 MPS model-op plan after weights are loaded.
+        # The provider is deliberately not an nn.Module and does not own
+        # parameters or KV storage.
+        self.op_provider = None
 
         self.use_fused_qk_norm_mrope = (
             _has_fused_qk_norm_mrope
@@ -284,6 +291,11 @@ class Qwen3Attention(nn.Module):
         if use_aiter_fused:
             q, k, v = self.forward_prepare_aiter_fused_mrope(
                 positions, hidden_states, forward_batch
+            )
+            save_kv_cache = False
+        elif self.op_provider is not None:
+            q, k, v = self.op_provider.prepare_qkv(
+                self, positions, hidden_states, forward_batch
             )
             save_kv_cache = False
         elif not _is_npu:
@@ -447,6 +459,48 @@ class Qwen3Model(Qwen2Model):
             decoder_layer_type=Qwen3DecoderLayer,
             alt_stream=alt_stream,
         )
+        # Bound after the standard Torch KV pool exists.  The provider is a
+        # plain object: Torch still owns every Parameter and cache allocation.
+        self.model_forward_provider = None
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        *,
+        allow_model_forward_provider: bool = True,
+    ):
+        provider = self.model_forward_provider
+        if (
+            allow_model_forward_provider
+            and provider is not None
+            and provider.should_run(
+                forward_batch,
+                model=self,
+                input_ids=input_ids,
+                positions=positions,
+                input_embeds=input_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )
+        ):
+            return provider.forward(
+                self,
+                input_ids,
+                positions,
+                forward_batch,
+                input_embeds=input_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )
+        return super().forward(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
 
 
 class Qwen3ForCausalLM(nn.Module):
@@ -524,7 +578,11 @@ class Qwen3ForCausalLM(nn.Module):
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
+            allow_model_forward_provider=not get_embedding,
         )
+
+        if isinstance(hidden_states, LogitsProcessorOutput):
+            return hidden_states
 
         aux_hidden_states = None
         if self.capture_aux_hidden_states:

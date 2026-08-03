@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Torch fallback for token filter operations (non-CUDA devices and HIP).
+"""Torch fallbacks for packed grammar bitmask operations.
 
 Sets or clears specific bits in an int32 bitmask by token ID.  The token list
 is typically tiny (< 10 entries); aggregation is done in Python with the actual
@@ -22,6 +22,63 @@ import ctypes
 from typing import List
 
 import torch
+
+
+def apply_token_bitmask_inplace_torch(
+    logits: torch.Tensor,
+    bitmask: torch.Tensor,
+) -> None:
+    """Apply xgrammar's packed int32 bitmask with ordinary Torch operations.
+
+    A set bit keeps a token and a cleared bit masks it to negative infinity.
+    This path is intended for devices without the CUDA/Triton kernel, including
+    MPS.  It performs no host readback and keeps the complete mask expansion on
+    the logits device.
+    """
+    if bitmask.dtype != torch.int32:
+        raise TypeError(f"bitmask must use torch.int32, found {bitmask.dtype}")
+    if logits.ndim not in (1, 2) or bitmask.ndim not in (1, 2):
+        raise ValueError(
+            "grammar logits and bitmask must each have one or two dimensions; "
+            f"found logits={tuple(logits.shape)}, bitmask={tuple(bitmask.shape)}"
+        )
+    if logits.device != bitmask.device:
+        raise ValueError(
+            "grammar logits and bitmask must be on the same device; "
+            f"found logits={logits.device}, bitmask={bitmask.device}"
+        )
+
+    logits_2d = logits.unsqueeze(0) if logits.ndim == 1 else logits
+    bitmask_2d = bitmask.unsqueeze(0) if bitmask.ndim == 1 else bitmask
+    if logits_2d.shape[0] != bitmask_2d.shape[0]:
+        raise ValueError(
+            "grammar logits and bitmask batch sizes differ: "
+            f"{logits_2d.shape[0]} vs {bitmask_2d.shape[0]}"
+        )
+
+    required_width = (int(logits_2d.shape[1]) + 31) // 32
+    if int(bitmask_2d.shape[1]) > required_width:
+        raise ValueError(
+            "grammar bitmask is wider than the logits vocabulary: "
+            f"{bitmask_2d.shape[1]} int32 words for {logits_2d.shape[1]} logits"
+        )
+    vocab_size = min(int(logits_2d.shape[1]), int(bitmask_2d.shape[1]) * 32)
+    if vocab_size == 0:
+        return
+
+    token_indices = torch.arange(
+        vocab_size,
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    word_indices = torch.div(token_indices, 32, rounding_mode="floor").to(torch.long)
+    bit_indices = torch.remainder(token_indices, 32)
+    packed_words = bitmask_2d[:, word_indices]
+    allowed = torch.bitwise_and(
+        torch.bitwise_right_shift(packed_words, bit_indices),
+        1,
+    ).to(torch.bool)
+    logits_2d[:, :vocab_size].masked_fill_(~allowed, float("-inf"))
 
 
 def set_token_filter_torch(

@@ -42,7 +42,7 @@ if _is_npu:
     ]
     apply_torch_npu_patches(torch_npu, patches)
 elif _is_mps:
-    from sglang.srt.hardware_backend.mlx.profiler import apply_metal_profiler_patches
+    from sglang.srt.hardware_backend.mps.profiler import apply_metal_profiler_patches
 
     apply_metal_profiler_patches()
 
@@ -323,6 +323,23 @@ class SchedulerProfilerManager:
                 message="Profiling is not in progress. Call /start_profile first.",
             )
 
+        try:
+            return self._stop_profile_impl(stage)
+        finally:
+            # A failed Metal stop/export or distributed barrier must not leave
+            # the scheduler believing a capture is still active.  Native
+            # capture stop is deliberately one-shot, so retaining the wrapper
+            # here would make every subsequent /start_profile unusable.
+            if self.torch_profiler is not None:
+                self.torch_profiler = None
+                gc.collect()
+            self.profile_in_progress = False
+            self.profiler_start_forward_ct = None
+            self._apply_detailed_annotations(False)
+
+    def _stop_profile_impl(
+        self, stage: Optional[ForwardMode] = None
+    ) -> ProfileReqOutput:
         self.torch_profiler_output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.profile_prefix:
@@ -394,15 +411,6 @@ class SchedulerProfilerManager:
             self.torch_profiler_output_dir,
             merge_message,
         )
-
-        if self.torch_profiler is not None:
-            self.torch_profiler = None
-            gc.collect()
-
-        self.profile_in_progress = False
-        self.profiler_start_forward_ct = None
-
-        self._apply_detailed_annotations(False)
         return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
 
     def _profile_batch_predicate(self, batch: ScheduleBatch):

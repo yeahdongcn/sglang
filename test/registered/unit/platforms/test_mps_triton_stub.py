@@ -8,9 +8,9 @@ import unittest
 import torch
 from packaging.version import Version
 
-from sglang.test.ci.ci_register import register_mlx_ci
+from sglang.test.ci.ci_register import register_mps_ci
 
-register_mlx_ci(est_time=1, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=1, suite="stage-a-unit-test-mps")
 
 
 @unittest.skipUnless(
@@ -21,6 +21,13 @@ register_mlx_ci(est_time=1, suite="stage-a-unit-test-mlx")
     "requires Torch >= 2.13 on Apple silicon",
 )
 class TestMpsTritonStub(unittest.TestCase):
+    def test_mps_backend_uses_torch_metadata_paths(self):
+        from sglang.srt.utils.common import support_triton
+
+        self.assertFalse(support_triton("mps"))
+        self.assertFalse(support_triton("torch_native"))
+        self.assertTrue(support_triton("triton"))
+
     def test_torch_inductor_imports_after_sglang_installs_stub(self):
         script = """
 import sglang

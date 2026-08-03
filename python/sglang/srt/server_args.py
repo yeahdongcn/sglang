@@ -57,7 +57,10 @@ from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import
 )
 from sglang.srt.environ import envs
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
-from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+from sglang.srt.hardware_backend.mps.runtime import (
+    validate_mps_model_config,
+    validate_mps_runtime,
+)
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.model_executor.cuda_graph_config import (
     ALLOWED_BACKENDS_PER_PHASE,
@@ -172,10 +175,6 @@ QUANTIZATION_CHOICES = [
     "quark",  # AMD Quark quantizer (FP8 / MXFP4 / Int4FP8 etc.)
     "quark_int4fp8_moe",
     "quark_mxfp4",  # Online MOE + linear quantization (incl. NVFP4 -> MXFP4 requantization).
-    # Apple Silicon MLX backend — on-the-fly quantization of fp16 weights at load
-    # time via mlx.nn.quantize. Only takes effect when SGLANG_USE_MLX=1.
-    "mlx_q4",  # 4 bits, group_size=64 (mlx-community default)
-    "mlx_q8",  # 8 bits, group_size=64
     "unquant",
     "humming",
 ]
@@ -210,6 +209,7 @@ ATTENTION_BACKEND_CHOICES = [
     "intel_amx",
     "ascend",
     "intel_xpu",
+    "mps",
 ]
 
 # trtllm_mha is valid for decode-only dense-MQA drafts. DFLASH rejects it
@@ -1266,7 +1266,7 @@ class ServerArgs:
     # -------------------------------------------------------------------------
     device: A[
         Optional[str],
-        "The device to use ('cuda', 'xpu', 'hpu', 'npu', 'cpu', 'musa'). Defaults to auto-detection if not specified.",
+        "The device to use ('cuda', 'xpu', 'hpu', 'npu', 'cpu', 'musa', 'mps'). Defaults to auto-detection if not specified.",
         NS("device"),
     ] = None
     base_gpu_id: A[
@@ -1280,25 +1280,6 @@ class ServerArgs:
         NS("device"),
     ] = 1
     random_seed: A[Optional[int], "The random seed.", NS("device")] = None
-    mlx_enable_sampling: A[
-        bool,
-        (
-            "MLX backend only: sample decode tokens (temperature / top-k / "
-            "top-p / min-p) instead of greedy argmax. Sampling runs inside "
-            "the lazy MLX graph, so it works with the overlap scheduler; "
-            "first tokens from prefill/extend are sampled too. Greedy "
-            "requests keep exact argmax behavior. Also enables on the MLX "
-            "path: grammar vocab masks and custom logit processors (these "
-            "break decode chaining per step; custom processors run on "
-            "pure-decode steps only), logit_bias, output logprobs (sampled "
-            "token / top-k / token_ids; prompt input logprobs are not "
-            "computed), NaN sanitization (SGLANG_SANITIZE_NAN_LOGITS), and "
-            "per-request sampling_seed under "
-            "--enable-deterministic-inference (deterministic within MLX "
-            "only). Penalties are not applied."
-        ),
-        NS("device"),
-    ] = False
     watchdog_timeout: A[
         float,
         "Set watchdog timeout in seconds. If a forward batch takes longer than this, the server will crash to prevent hanging.",
@@ -3988,6 +3969,10 @@ class ServerArgs:
 
         materialize_declarations(self)
 
+        if self.device == "mps":
+            self._validate_mps_server_args()
+            self._validate_mps_resolved_model_config()
+
     def _handle_return_hidden_states_mode(self):
         if self.return_hidden_states_mode not in (None, "last", "full"):
             raise ValueError(
@@ -4676,11 +4661,13 @@ class ServerArgs:
             )
 
     def _handle_hardware_runtime_validation(self):
-        # This is intentionally independent of self.device: setting
-        # SGLANG_USE_MLX opts into the MLX backend and must fail immediately if
-        # the environment cannot honor that request. With the flag unset,
-        # use_mlx() remains lazy and does not import MLX.
-        use_mlx()
+        requested_device = getattr(self, "device", None)
+        explicitly_mps = requested_device is not None and (
+            str(requested_device).split(":", 1)[0] == "mps"
+        )
+        automatically_mps = requested_device is None and current_platform.is_mps()
+        if explicitly_mps or automatically_mps:
+            ServerArgs._validate_mps_server_args(self)
 
     def _handle_npu_backends(self):
         if self.device == "npu":
@@ -4698,11 +4685,130 @@ class ServerArgs:
 
     def _handle_mps_backends(self):
         if self.device == "mps":
-            if not use_mlx():
-                self._declare(
-                    "_handle_mps_backends",
-                    disable_overlap_schedule=True,
+            self._declare(
+                "_handle_mps_backends",
+                disable_overlap_schedule=True,
+            )
+            ServerArgs._validate_mps_server_args(self)
+
+    def _validate_mps_server_args(self):
+        """Fail before model loading for execution modes MPS cannot run."""
+
+        validate_mps_runtime()
+
+        supported_attention_backends = {None, "mps", "torch_native"}
+        for field in (
+            "attention_backend",
+            "prefill_attention_backend",
+            "decode_attention_backend",
+        ):
+            value = getattr(self, field, None)
+            normalized = getattr(value, "value", value)
+            normalized = None if normalized is None else str(normalized).lower()
+            if normalized not in supported_attention_backends:
+                raise ValueError(
+                    "Torch MPS currently supports only the mps or torch_native "
+                    f"attention backend; got {field}={value!r}"
                 )
+
+        sampling_backend = getattr(self, "sampling_backend", None)
+        normalized_sampling = getattr(sampling_backend, "value", sampling_backend)
+        normalized_sampling = (
+            None if normalized_sampling is None else str(normalized_sampling).lower()
+        )
+        if normalized_sampling not in {None, "pytorch"}:
+            raise ValueError(
+                "Torch MPS currently supports only the pytorch sampling backend; "
+                f"got sampling_backend={sampling_backend!r}"
+            )
+
+        kv_cache_dtype = str(getattr(self, "kv_cache_dtype", "auto")).lower()
+        if kv_cache_dtype not in {"auto", "bf16", "bfloat16"}:
+            raise ValueError(
+                "Torch MPS currently supports only auto/bf16 KV cache dtypes; "
+                f"got kv_cache_dtype={kv_cache_dtype!r}"
+            )
+
+        if envs.SGLANG_USE_HND_KVCACHE.get():
+            raise ValueError(
+                "Torch MPS currently requires the standard NHD KV cache; "
+                "SGLANG_USE_HND_KVCACHE=1 is unsupported"
+            )
+
+        if getattr(self, "dllm_algorithm", None) is not None:
+            raise ValueError(
+                "Torch MPS does not yet support DLLM execution; disable "
+                "--dllm-algorithm before launching"
+            )
+
+        disaggregation_mode = getattr(self, "disaggregation_mode", None)
+        if disaggregation_mode not in (None, "null"):
+            raise ValueError(
+                "Torch MPS does not yet support disaggregated serving; set "
+                "--disaggregation-mode null before launching"
+            )
+
+        if bool(getattr(self, "enable_multimodal", False)):
+            raise ValueError(
+                "Torch MPS multimodal serving is not yet validated; disable "
+                "--enable-multimodal before launching"
+            )
+
+        speculative_algorithm = getattr(self, "speculative_algorithm", None)
+        if speculative_algorithm is not None:
+            raise ValueError(
+                "Torch MPS does not yet support speculative decoding; disable "
+                "--speculative-algorithm before launching. The standard MPS "
+                "model path must not enter CUDA-only verification kernels."
+            )
+
+        enable_lora = getattr(self, "enable_lora", None)
+        lora_requested = enable_lora is True or (
+            enable_lora is None and bool(getattr(self, "lora_paths", None))
+        )
+        if lora_requested:
+            lora_backend = getattr(self, "lora_backend", "csgmv")
+            if lora_backend != "torch_native":
+                raise ValueError(
+                    "Torch MPS LoRA requires --lora-backend torch_native; "
+                    f"got lora_backend={lora_backend!r}. Triton/csgmv LoRA "
+                    "kernels are not valid on MPS."
+                )
+            if bool(getattr(self, "enable_lora_overlap_loading", False)):
+                raise ValueError(
+                    "Torch MPS does not yet support LoRA overlap loading; "
+                    "disable --enable-lora-overlap-loading"
+                )
+
+        if bool(getattr(self, "enable_torch_compile", False)):
+            raise ValueError(
+                "Torch MPS does not yet provide an SGLang torch.compile graph "
+                "runner; disable --enable-torch-compile. MLX compilation is "
+                "selected independently inside eligible MPS semantic operators."
+            )
+
+        quantization = getattr(self, "quantization", None)
+        if quantization not in (None, "unquant"):
+            raise ValueError(
+                "Torch MPS currently supports only unquantized model weights; "
+                f"got quantization={quantization!r}"
+            )
+
+        if (
+            getattr(self, "tp_size", 1) != 1
+            or getattr(self, "pp_size", 1) != 1
+            or getattr(self, "dp_size", 1) != 1
+        ):
+            raise ValueError(
+                "Torch MPS currently requires tp_size=1, pp_size=1, and dp_size=1"
+            )
+
+    def _validate_mps_resolved_model_config(self):
+        """Validate checkpoint-derived values after model config resolution."""
+        validate_mps_model_config(
+            self.get_model_config(),
+            lora_enabled=bool(getattr(self, "enable_lora", False)),
+        )
 
     def _handle_xpu_backends(self):
         if self.device == "xpu":
@@ -5899,32 +6005,28 @@ class ServerArgs:
         elif model_arch in ["GptOssForCausalLM"]:
             # Attention backend selection + XPU dtype validation moved to the
             # override registry (arg_groups/overrides.py: _gpt_oss_overrides).
-            # Exempt MLX only: none of these backends exist on MPS, and MLX runs
-            # attention inside its own runner, so attention_backend is still
-            # unset here.  Plain macOS stays on the list -- torch_native has
-            # neither sliding window nor attention sinks.
-            if not (is_mps() and use_mlx()):
-                supported_backends = [
-                    "triton",
-                    "trtllm_mha",
-                    "fa3",
-                    "fa4",
-                    "ascend",
-                    "intel_amx",
-                    "intel_xpu",
-                    "aiter",
-                ]
-                prefill_attn_backend, decode_attn_backend = (
-                    self._resolved_attention_backends()
-                )
-                assert (
-                    prefill_attn_backend in supported_backends
-                    and decode_attn_backend in supported_backends
-                ), (
-                    f"GptOssForCausalLM requires one of {supported_backends} attention backend, but got the following backends\n"
-                    f"- Prefill: {prefill_attn_backend}\n"
-                    f"- Decode: {decode_attn_backend}\n"
-                )
+
+            supported_backends = [
+                "triton",
+                "trtllm_mha",
+                "fa3",
+                "fa4",
+                "ascend",
+                "intel_amx",
+                "intel_xpu",
+                "aiter",
+            ]
+            prefill_attn_backend, decode_attn_backend = (
+                self._resolved_attention_backends()
+            )
+            assert (
+                prefill_attn_backend in supported_backends
+                and decode_attn_backend in supported_backends
+            ), (
+                f"GptOssForCausalLM requires one of {supported_backends} attention backend, but got the following backends\n"
+                f"- Prefill: {prefill_attn_backend}\n"
+                f"- Decode: {decode_attn_backend}\n"
+            )
 
             quant_method = get_quantization_config(hf_config)
             is_mxfp4_quant_format = quant_method == "mxfp4"
@@ -6270,8 +6372,8 @@ class ServerArgs:
                 return "trtllm_mha"
             elif is_hip():
                 return "aiter"
-            elif is_mps():
-                return "torch_native"
+            elif current_platform.is_mps():
+                return current_platform.get_default_attention_backend()
             else:
                 # FlashInfer does not support attention sinks.
                 if is_flashinfer_available() and not model_config.has_attention_sinks:
@@ -6290,8 +6392,8 @@ class ServerArgs:
                     return "aiter"
                 else:
                     return "triton"
-            elif is_mps():
-                return "torch_native"
+            elif current_platform.is_mps():
+                return current_platform.get_default_attention_backend()
             else:
                 return "triton"
 
@@ -6315,11 +6417,15 @@ class ServerArgs:
         # Split-backend override + default fill.
         run_post_process_pass(self, _attention_backend_default)
 
-        # Torch native and flex attention backends
+        # Torch native, MPS, and flex attention backends
         attention_backend = resolved_view(self).attention_backend
-        if attention_backend == "torch_native":
+        if attention_backend in {"mps", "torch_native"}:
+            backend_display_name = (
+                "MPS" if attention_backend == "mps" else "torch native"
+            )
             logger.warning(
-                "Cuda graph is disabled because of using torch native attention backend"
+                "Cuda graph is disabled because of using %s attention backend",
+                backend_display_name,
             )
             self.cuda_graph_config.decode.backend = Backend.DISABLED
             self.cuda_graph_config.prefill.backend = Backend.DISABLED
@@ -10012,6 +10118,9 @@ class ServerArgs:
             raise ValueError(
                 "--kv-canary-sweep-interval requires --kv-canary in {log, raise}"
             )
+
+        if self.device == "mps":
+            self._validate_mps_server_args()
 
     def check_lora_server_args(self):
         assert self.max_loras_per_batch > 0, "max_loras_per_batch must be positive"

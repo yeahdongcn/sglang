@@ -27,7 +27,10 @@ import torch
 import tqdm
 
 from sglang.srt.distributed.parallel_state import GroupCoordinator
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.layers.logits_processor import (
+    LogitsProcessorOutput,
+    require_graph_compatible_logits_output,
+)
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
     ForwardBatch,
@@ -977,6 +980,8 @@ class CPUGraphRunner:
                     prepared_forward_batch.positions,
                     prepared_forward_batch,
                 )
+        if isinstance(output, LogitsProcessorOutput):
+            require_graph_compatible_logits_output(output, "CPUGraphRunner")
         if forward_batch.batch_size in graphs:
             return output
 

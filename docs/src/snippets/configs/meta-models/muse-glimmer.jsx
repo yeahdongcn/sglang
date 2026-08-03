@@ -1,7 +1,7 @@
 export const config = {
   modelName: "Muse Glimmer",
 
-  supportedHardware: ["b200", "h200", "rtx5090", "rtx6000", "dgx-spark", "mac"],
+  supportedHardware: ["b200", "h200", "rtx5090", "rtx6000", "dgx-spark"],
 
   hardware: [
     // RTX 5090 and RTX PRO 6000 are Blackwell-generation but not in the shared
@@ -12,9 +12,6 @@ export const config = {
     // dgx-spark is NOT listed here -- it's already in the shared
     // HARDWARE_CATALOG under blackwell (with its multi-node docker flags),
     // so this model just inherits that entry.
-    // Apple Silicon Mac (MLX backend, unified memory). Benchmarked on an
-    // M5 Pro 64GB; the q4km-gs128 artifact fits a 48GB machine.
-    { id: "mac",       label: "Apple Silicon", vram: "48GB+", vendor: "apple" },
   ],
 
   variants: [{ id: "default", label: "Default" }],
@@ -23,16 +20,7 @@ export const config = {
     { id: "bf16",         label: "BF16" },
     { id: "gguf",         label: "GGUF Q4_K_M" },
     { id: "nvfp4",        label: "NVFP4" },
-    // Three MLX artifacts, all Apple-Silicon-only. gs128 is the one with a
-    // measured GSM8K / CIMemories round (see the cookbook §3.4 table); the
-    // other two serve with the same recipe but are not benchmarked yet.
-    { id: "mlx-q4",       label: "MLX Q4" },
-    { id: "mlx-q4km",     label: "MLX Q4_K_M (gs128)" },
-    { id: "mlx-q4k-dyn",  label: "MLX Q4_K (dynamic)" },
   ],
-
-  // No Docker path on Apple Silicon — the MLX backend runs native-only.
-  runModes: (s) => (s.hw === "mac" ? ["python"] : ["python", "docker"]),
 
   strategies: [
     { id: "standard", label: "Standard" },
@@ -46,8 +34,8 @@ export const config = {
       id: "modality",
       title: "Modality",
       default: "text",
-      // GGUF and every MLX artifact are text-only; no modality choice there.
-      showWhen: (s) => s.quant !== "gguf" && !(s.quant || "").startsWith("mlx-"),
+      // GGUF is text-only; no modality choice there.
+      showWhen: (s) => s.quant !== "gguf",
       options: [
         // NVFP4 ships with no vision weights despite config.json declaring
         // vision_config, so "Image + text" only shows for bf16.
@@ -65,9 +53,6 @@ export const config = {
     "default|bf16": "meta-models/Muse-Glimmer-30B",
     "default|gguf": "meta-models/Muse-Glimmer-30B-GGUF/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
     "default|nvfp4": "RadixArk/Muse-Glimmer-NVFP4",
-    "default|mlx-q4": "RadixArk/Muse-Glimmer-q4-MLX",
-    "default|mlx-q4km": "RadixArk/Muse-Glimmer-q4km-gs128-MLX",
-    "default|mlx-q4k-dyn": "RadixArk/Muse-Glimmer-q4k-dynamic-MLX",
   },
 
   placeholders: {
@@ -387,52 +372,6 @@ export const config = {
         "--tool-call-parser muse",
         "--speculative-algorithm DFLASH",
         "--speculative-draft-model-path {{DRAFT_PATH}}",
-        "--mem-fraction-static 0.85",
-        "--host {{HOST_IP}}",
-        "--port {{PORT}}",
-      ],
-    },
-
-    {
-      match: { hw: "mac", variant: "default", quant: "mlx-q4", strategy: "standard", nodes: "single" },
-      verified: false,
-      env: ["SGLANG_USE_MLX=1", "SGLANG_MLX_CACHE_LIMIT_GB=8"],
-      flags: [
-        "--model-path {{MODEL_NAME}}",
-        "--trust-remote-code",
-        "--reasoning-parser muse",
-        "--tool-call-parser muse",
-        "--disable-radix-cache",
-        "--mem-fraction-static 0.85",
-        "--host {{HOST_IP}}",
-        "--port {{PORT}}",
-      ],
-    },
-    {
-      match: { hw: "mac", variant: "default", quant: "mlx-q4km", strategy: "standard", nodes: "single" },
-      verified: true,
-      env: ["SGLANG_USE_MLX=1", "SGLANG_MLX_CACHE_LIMIT_GB=8"],
-      flags: [
-        "--model-path {{MODEL_NAME}}",
-        "--trust-remote-code",
-        "--reasoning-parser muse",
-        "--tool-call-parser muse",
-        "--disable-radix-cache",
-        "--mem-fraction-static 0.85",
-        "--host {{HOST_IP}}",
-        "--port {{PORT}}",
-      ],
-    },
-    {
-      match: { hw: "mac", variant: "default", quant: "mlx-q4k-dyn", strategy: "standard", nodes: "single" },
-      verified: false,
-      env: ["SGLANG_USE_MLX=1", "SGLANG_MLX_CACHE_LIMIT_GB=8"],
-      flags: [
-        "--model-path {{MODEL_NAME}}",
-        "--trust-remote-code",
-        "--reasoning-parser muse",
-        "--tool-call-parser muse",
-        "--disable-radix-cache",
         "--mem-fraction-static 0.85",
         "--host {{HOST_IP}}",
         "--port {{PORT}}",

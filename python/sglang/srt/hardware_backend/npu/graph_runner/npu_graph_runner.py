@@ -42,6 +42,11 @@ from sglang.srt.configs.model_config import (
 )
 from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.environ import envs
+from sglang.srt.layers.logits_processor import (
+    LogitsProcessorOutput,
+    require_graph_compatible_logits_output,
+)
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.runner import DecodeCudaGraphRunner
 from sglang.srt.utils import (
     empty_context,
@@ -60,9 +65,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
-
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 
 
 @contextmanager
@@ -256,6 +258,7 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
             output = self.backend.replay(graph_key, forward_batch)
 
         if isinstance(output, LogitsProcessorOutput):
+            require_graph_compatible_logits_output(output, "NPUGraphRunner")
             if self.is_dllm:
                 next_token_logits = None
                 full_logits = (

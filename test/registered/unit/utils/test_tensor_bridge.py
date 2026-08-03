@@ -1,7 +1,6 @@
 """Correctness and sharing tests for the PyTorch/MLX tensor bridge."""
 
 import gc
-import os
 import subprocess
 import sys
 import unittest
@@ -11,6 +10,11 @@ from unittest import mock
 import torch
 from packaging.version import Version
 
+from sglang.srt.utils._phase_timing import (
+    current_phase_recorder,
+    measure_phase,
+    phase_recorder,
+)
 from sglang.srt.utils.tensor_bridge import (
     MlxTensorView,
     borrow_torch_tensors,
@@ -19,9 +23,9 @@ from sglang.srt.utils.tensor_bridge import (
     mlx_to_torch,
     torch_to_mlx,
 )
-from sglang.test.ci.ci_register import register_mlx_ci
+from sglang.test.ci.ci_register import register_mps_ci
 
-register_mlx_ci(est_time=2, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=2, suite="stage-a-unit-test-mps")
 
 
 def _has_stable_version_at_least(distribution: str, minimum: Version) -> bool:
@@ -42,6 +46,32 @@ _HAS_SUPPORTED_RUNTIME = (
 
 
 class TestTensorBridgeImport(unittest.TestCase):
+    def test_phase_recorder_is_context_local_and_restored(self):
+        events = []
+        self.assertIsNone(current_phase_recorder())
+        with phase_recorder(lambda name, duration: events.append((name, duration))):
+            self.assertIsNotNone(current_phase_recorder())
+            self.assertEqual(
+                measure_phase(current_phase_recorder(), "unit", lambda: 7), 7
+            )
+        self.assertIsNone(current_phase_recorder())
+        self.assertEqual([name for name, _ in events], ["unit"])
+
+    def test_phase_recorder_failure_does_not_mask_operation_failure(self):
+        def broken_recorder(_name, _duration):
+            raise RuntimeError("diagnostic sink failed")
+
+        def failing_operation():
+            raise ValueError("operation failed")
+
+        with phase_recorder(broken_recorder):
+            with self.assertRaisesRegex(ValueError, "operation failed"):
+                measure_phase(
+                    current_phase_recorder(),
+                    "unit",
+                    failing_operation,
+                )
+
     def test_import_does_not_eagerly_import_mlx(self):
         script = """
 import sys
@@ -49,15 +79,12 @@ from sglang.srt.utils.tensor_bridge import mlx_to_torch, torch_to_mlx
 assert mlx_to_torch is not None and torch_to_mlx is not None
 assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
 """
-        env = os.environ.copy()
-        env.pop("SGLANG_USE_MLX", None)
         completed = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
-            env=env,
         )
         self.assertEqual(
             completed.returncode,
@@ -72,14 +99,17 @@ class TestTensorBridgeCpu(unittest.TestCase):
         import mlx.core as mx
 
         source = torch.tensor([1.25, -2.5, 4.0, 8.0], dtype=torch.float64)
+        after_fence = mock.Mock()
         with mock.patch.object(mx, "eval", wraps=mx.eval) as evaluate:
             first, second = mlx_call_multi(
                 lambda x: (x + 1, x * 2),
                 source,
                 device="cpu",
+                after_mps_fence=after_fence,
             )
 
         evaluate.assert_called_once()
+        after_fence.assert_not_called()
         self.assertEqual(first.dtype, torch.float64)
         self.assertEqual(second.dtype, torch.float64)
         torch.testing.assert_close(first, source + 1)
@@ -102,13 +132,16 @@ class TestTensorBridgeCpu(unittest.TestCase):
 
     def test_mlx_call_multi_rejects_invalid_target_before_work(self):
         operation = mock.Mock()
+        after_fence = mock.Mock()
         with self.assertRaisesRegex(ValueError, "CPU and MPS targets"):
             mlx_call_multi(
                 operation,
                 torch.ones(1),
                 device="cuda",
+                after_mps_fence=after_fence,
             )
         operation.assert_not_called()
+        after_fence.assert_not_called()
 
     def test_mlx_call_rejects_invalid_target_before_work(self):
         operation = mock.Mock()
@@ -127,6 +160,17 @@ class TestTensorBridgeCpu(unittest.TestCase):
                 torch.ones(1),
                 device="cpu",
             )
+
+    def test_mlx_call_multi_validates_fence_hook_before_work(self):
+        operation = mock.Mock()
+        with self.assertRaisesRegex(TypeError, "callable or None"):
+            mlx_call_multi(
+                operation,
+                torch.ones(1),
+                device="cpu",
+                after_mps_fence=object(),
+            )
+        operation.assert_not_called()
 
 
 @unittest.skipUnless(_HAS_SUPPORTED_RUNTIME, "requires MLX >= 0.32 and Torch MPS")
@@ -296,6 +340,8 @@ class TestTensorBridgeMetalSharing(unittest.TestCase):
             real_synchronize()
             events.append("fence returned")
 
+        after_fence = mock.Mock(side_effect=lambda: events.append("callback"))
+
         def operation(x):
             events.append("operation")
             captured["arrays"] = (x + 1, x * 2)
@@ -324,12 +370,21 @@ class TestTensorBridgeMetalSharing(unittest.TestCase):
                 operation,
                 source,
                 device="mps",
+                after_mps_fence=after_fence,
             )
 
         synchronize.assert_called_once_with()
+        after_fence.assert_called_once_with()
         self.assertEqual(
             events,
-            ["fence returned", "operation", "eval", "dlpack", "dlpack"],
+            [
+                "fence returned",
+                "callback",
+                "operation",
+                "eval",
+                "dlpack",
+                "dlpack",
+            ],
         )
         evaluate.assert_called_once()
         self.assertEqual(len(evaluate.call_args.args), 2)
@@ -346,16 +401,43 @@ class TestTensorBridgeMetalSharing(unittest.TestCase):
         torch.mps.synchronize()
         self.assertTrue(mx.all(captured["arrays"][0] == 7).item())
 
+    def test_mlx_call_multi_reports_bridge_phases_only_when_recording(self):
+        source = torch.arange(8, device="mps", dtype=torch.float32)
+        events = []
+        with phase_recorder(lambda name, duration: events.append((name, duration))):
+            first, second = mlx_call_multi(
+                lambda x: (x + 1, x * 2),
+                source,
+                device="mps",
+            )
+
+        self.assertEqual(
+            [name for name, _ in events],
+            [
+                "producer_fence",
+                "input_import",
+                "graph_build",
+                "prepare_eval",
+                "dlpack_export",
+            ],
+        )
+        self.assertTrue(all(duration >= 0.0 for _, duration in events))
+        torch.testing.assert_close(first.cpu(), source.cpu() + 1)
+        torch.testing.assert_close(second.cpu(), source.cpu() * 2)
+
     def test_mlx_call_multi_keeps_borrowed_inputs_alive_until_all_exports(self):
         source = torch.arange(8, device="mps", dtype=torch.float32)
         view = MlxTensorView(source)
         expected = source.cpu()
+        after_fence = mock.Mock()
 
         first, second = mlx_call_multi(
             lambda x: (x + 3, x - 3),
             view,
             device="mps",
+            after_mps_fence=after_fence,
         )
+        after_fence.assert_called_once_with()
         del source, view
         gc.collect()
 
@@ -400,21 +482,25 @@ with ThreadPoolExecutor(max_workers=2) as pool:
         with self.assertRaisesRegex(TypeError, "non-empty tuple or list"):
             mlx_call_multi(lambda x: x + 1, source, device="mps")
 
-    def test_mlx_call_multi_cpu_input_does_not_fence_mps(self):
+    def test_mlx_call_multi_cpu_input_does_not_trigger_fence_hook(self):
         source = torch.arange(8, dtype=torch.float32)
+        after_fence = mock.Mock()
 
         with mock.patch.object(torch.mps, "synchronize") as synchronize:
             (result,) = mlx_call_multi(
                 lambda x: (x + 1,),
                 source,
                 device="mps",
+                after_mps_fence=after_fence,
             )
 
         synchronize.assert_not_called()
+        after_fence.assert_not_called()
         torch.testing.assert_close(result.cpu(), source + 1)
 
-    def test_mlx_call_multi_sync_failure_precedes_graph_build(self):
+    def test_mlx_call_multi_sync_failure_preserves_previous_ownership(self):
         source = torch.ones(1, device="mps")
+        after_fence = mock.Mock()
         operation = mock.Mock()
 
         with (
@@ -429,12 +515,37 @@ with ThreadPoolExecutor(max_workers=2) as pool:
                 operation,
                 source,
                 device="mps",
+                after_mps_fence=after_fence,
             )
 
+        after_fence.assert_not_called()
         operation.assert_not_called()
 
-    def test_mlx_call_multi_propagates_operation_failure(self):
+    def test_mlx_call_multi_callback_failure_precedes_graph_build(self):
+        import mlx.core as mx
+
         source = torch.ones(1, device="mps")
+        after_fence = mock.Mock(side_effect=RuntimeError("retirement failed"))
+        operation = mock.Mock()
+
+        with (
+            mock.patch.object(mx, "eval", wraps=mx.eval) as evaluate,
+            self.assertRaisesRegex(RuntimeError, "retirement failed"),
+        ):
+            mlx_call_multi(
+                operation,
+                source,
+                device="mps",
+                after_mps_fence=after_fence,
+            )
+
+        after_fence.assert_called_once_with()
+        operation.assert_not_called()
+        evaluate.assert_not_called()
+
+    def test_mlx_call_multi_operation_failure_keeps_completed_retirement(self):
+        source = torch.ones(1, device="mps")
+        after_fence = mock.Mock()
 
         def operation(_source):
             raise RuntimeError("graph build failed")
@@ -444,7 +555,10 @@ with ThreadPoolExecutor(max_workers=2) as pool:
                 operation,
                 source,
                 device="mps",
+                after_mps_fence=after_fence,
             )
+
+        after_fence.assert_called_once_with()
 
     def test_bridge_detaches_autograd_and_synchronizes_producers(self):
         import mlx.core as mx

@@ -66,6 +66,9 @@ class _AllPlatformsOp(BaseFusedOp):
     def forward_hip(self, x):
         return "hip"
 
+    def forward_mps(self, x):
+        return "mps"
+
     def forward_npu(self, x):
         return "npu"
 
@@ -151,6 +154,7 @@ def test_is_standard_nn_module(monkeypatch):
     [
         ("cuda", "cuda"),
         ("hip", "hip"),
+        ("mps", "mps"),
         ("npu", "npu"),
         ("xpu", "xpu"),
         ("musa", "musa"),
@@ -167,6 +171,7 @@ def test_platform_forward_dispatch(monkeypatch, key, expect):
     "key, expect",
     [
         ("hip", "cuda"),  # HIP falls back to the CUDA path (hipified kernels)
+        ("mps", "native"),  # MPS requires an explicit forward_mps implementation
         # MUSA has no implicit CUDA fallback: srt kernel imports are gated on
         # is_cuda(), so silently entering forward_cuda on a MUSA box can
         # NameError; ops opt in with an explicit forward_musa instead.
@@ -379,6 +384,42 @@ def test_backend_eligible_override_gates_per_call(monkeypatch):
     assert op(torch.zeros(4)) == "jit"
     assert op(torch.zeros(3)) == "native"  # same instance, per-call bounce
     assert op(torch.zeros(8)) == "jit"
+
+
+def test_dynamic_gate_resolution_and_trace_share_one_predicate_pass(monkeypatch):
+    class _Gated(BaseFusedOp):
+        op = "test.dynamic_trace"
+        priority = (KernelBackend.JIT, KernelBackend.TORCH)
+        capabilities = {KernelBackend.JIT: frozenset()}
+
+        def __init__(self):
+            super().__init__()
+            self.eligibility_calls = []
+
+        def forward_native(self, x):
+            return "native"
+
+        def forward_jit(self, x):
+            return "jit"
+
+        def backend_eligible(self, backend, *args, **kwargs):
+            self.eligibility_calls.append(backend)
+            if not super().backend_eligible(backend, *args, **kwargs):
+                return False
+            return backend is not KernelBackend.JIT or args[0].shape[-1] % 2 == 0
+
+    _mock_platform(monkeypatch, key="", info=_CPU)
+    op = _Gated()
+    assert op._resolve_backend(torch.zeros(4)) is KernelBackend.JIT
+    assert op._resolve_backend(torch.zeros(3)) is KernelBackend.TORCH
+
+    op.eligibility_calls.clear()
+    fo.enable_fused_op_trace()
+    assert op(torch.zeros(4)) == "jit"
+    assert op(torch.zeros(3)) == "native"
+
+    assert op.eligibility_calls == [KernelBackend.JIT, KernelBackend.JIT]
+    assert [record.backend for record in fo.get_fused_op_trace()] == ["jit", "torch"]
 
 
 # --- torch.compile protocol -----------------------------------------------------

@@ -27,6 +27,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.lora.backend.base_backend import BaseLoRABackend
 from sglang.srt.lora.utils import LoRABatchInfo, get_lm_head_lora_b_shard_size
 from sglang.srt.runtime_context import get_parallel
+from sglang.srt.utils import is_pin_memory_available
 
 _SGLANG_EXPERIMENTAL_LORA_OPTI = envs.SGLANG_EXPERIMENTAL_LORA_OPTI.get()
 
@@ -34,6 +35,26 @@ _SGLANG_EXPERIMENTAL_LORA_OPTI = envs.SGLANG_EXPERIMENTAL_LORA_OPTI.get()
 def unwrap_lora_layer(module: nn.Module) -> nn.Module:
     """Return the plain module behind a LoRA wrapper, or the module itself."""
     return module.base_layer if isinstance(module, BaseLayerWithLoRA) else module
+
+
+def _make_output_offsets(
+    offsets: list[int], device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create device offsets and their host-owned control-flow copy.
+
+    CUDA benefits from pinned host offsets; Apple MPS has no pinned allocator
+    and can terminate the process when one is requested. Keep the ownership
+    contract identical while selecting host allocation policy by platform.
+    """
+    return (
+        torch.tensor(offsets, dtype=torch.int32, device=device),
+        torch.tensor(
+            offsets,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=is_pin_memory_available(device),
+        ),
+    )
 
 
 class BaseLayerWithLoRA(nn.Module):
@@ -117,16 +138,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 not get_attn_tp_context().allow_input_scattered
             ), "VocabParallelEmbeddingWithLoRA with TP > 1 under input_scattered mode (e.g., DeepSeek-v2 MLA with --enable-attn-tp-input-scattered) is not fully supported and may produce incorrect results. Consider disabling input_scattered or removing embed_tokens from LoRA target modules."
         offsets = [0, self.embed_dim]
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(base_layer.parameters()).device,
-        )
-        self.output_offset_cpu = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(base_layer.parameters()).device
         )
 
     def set_lora_info(
@@ -303,16 +316,8 @@ class ParallelLMHeadWithLoRA(BaseLayerWithLoRA):
             )
             offsets = [0, self.shard_vocab_size]
 
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(base_layer.parameters()).device,
-        )
-        self.output_offset_cpu = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(base_layer.parameters()).device
         )
 
     def set_lora_info(
@@ -450,16 +455,8 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         super().__init__(base_layer, lora_backend)
         shard_size = self.base_layer.output_partition_sizes[0]
         offsets = [0, shard_size]
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(self.base_layer.parameters()).device,
-        )
-        self.output_offset_cpu = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(self.base_layer.parameters()).device
         )
 
     def set_lora_info(
@@ -549,12 +546,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 f"LoRA B output dim {B_buffer.shape[-2]} does not match "
                 f"base partition prefix dim {offsets[-1]} for {lora_n_slices} slices."
             )
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(self.base_layer.parameters()).device,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(self.base_layer.parameters()).device
         )
-        self.output_offset_cpu = self.output_offset.cpu().pin_memory()
         self.max_out_dim = max(partition_sizes)
         self.use_gate_up_lora = (
             lora_n_slices == 2 and partition_sizes[0] == partition_sizes[1]
@@ -666,16 +660,8 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             q_proj_shard_size + kv_proj_shard_size,
             q_proj_shard_size + 2 * kv_proj_shard_size,
         ]
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(self.base_layer.parameters()).device,
-        )
-        self.output_offset_cpu = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(self.base_layer.parameters()).device
         )
 
         # For computing number of launched blocks
@@ -750,16 +736,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.B_buffer = B_buffer
         output_size = self.base_layer.output_size
         offsets = [0, output_size]
-        self.output_offset = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device=next(self.base_layer.parameters()).device,
-        )
-        self.output_offset_cpu = torch.tensor(
-            offsets,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
+        self.output_offset, self.output_offset_cpu = _make_output_offsets(
+            offsets, next(self.base_layer.parameters()).device
         )
 
     def apply_lora(self, base_output: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

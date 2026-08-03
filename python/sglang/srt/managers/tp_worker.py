@@ -88,6 +88,11 @@ class BaseTpWorker(ABC):
     def model_runner(self) -> ModelRunner:
         pass
 
+    def get_platform_operator_state(self) -> Optional[dict]:
+        """Expose target-runner provider telemetry at the worker boundary."""
+        get_state = getattr(self.model_runner, "get_platform_operator_state", None)
+        return get_state() if callable(get_state) else None
+
     @property
     def last_shared_read_runner(self):
         # The runner that runs the step's LAST shared-buffer-reading phase --
@@ -447,6 +452,17 @@ class TpModelWorker(BaseTpWorker):
         self.model_runner.finalize_startup_weight_load()
         for mr in self.model_runner_list[1:]:
             mr.finalize_startup_weight_load()
+
+    def close_platform_operators(self) -> None:
+        """Close custom-op plans for every ModelRunner owned by this worker."""
+        seen = set()
+        for runner in self.model_runner_list or [self.model_runner]:
+            if id(runner) in seen:
+                continue
+            seen.add(id(runner))
+            close = getattr(runner, "close_platform_operators", None)
+            if callable(close):
+                close()
 
     def _init_model_config(self):
         from sglang.srt.configs.model_config import ModelConfig

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tensor bridge between MLX and PyTorch on Apple silicon.
 
-The MLX backend requires MLX >= 0.32 and PyTorch >= 2.13.  Ordinary
+The MLX operator path requires MLX >= 0.32 and PyTorch >= 2.13.  Ordinary
 ``torch_to_mlx`` conversion creates an independent MLX allocation.  The
 zero-copy ``mlx_call`` helper is available for a complete MLX operation and
 keeps all borrowed DLPack inputs alive until the result has been evaluated.
@@ -23,6 +23,8 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import torch
+
+from sglang.srt.utils._phase_timing import current_phase_recorder, measure_phase
 
 if TYPE_CHECKING:
     import mlx.core as mx
@@ -104,7 +106,7 @@ class MlxTensorView:
     The view deliberately retains a detached Torch tensor *and* the imported
     MLX array.  Holding only the array is insufficient: a later parameter
     replacement or garbage collection could invalidate the borrowed storage
-    while MLX still has a lazy graph referring to it. This class is intended
+    while MLX still has a lazy graph referring to it.  This class is intended
     for immutable inference weights; construct a new view after replacing the
     source storage.
     """
@@ -312,6 +314,7 @@ def mlx_call_multi(
     operation: Callable[..., tuple[mx.array, ...]],
     *tensors: torch.Tensor | MlxTensorView,
     device: torch.device | Literal["mps", "cpu"] | None = None,
+    after_mps_fence: Callable[[], None] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run one MLX operation and export all of its outputs as Torch tensors.
 
@@ -329,8 +332,18 @@ def mlx_call_multi(
     additional materialization evaluation; contiguous MPS model outputs take
     the single-evaluation, zero-copy path.
 
+    ``after_mps_fence`` is a narrow ownership-retirement hook.  When this call
+    has a Torch MPS producer, the hook runs exactly once after the existing
+    producer fence succeeds and before any current input is imported or the
+    MLX graph is built.  It is not called for CPU-only inputs.  The hook must
+    be synchronous and host-only; it must not enqueue framework work or add
+    another synchronization boundary.
     """
+    if after_mps_fence is not None and not callable(after_mps_fence):
+        raise TypeError("after_mps_fence must be callable or None")
+
     mx = _mlx_core()
+    phase_recorder = current_phase_recorder()
     target_device = _get_torch_device() if device is None else torch.device(device)
     if target_device.type not in {"cpu", "mps"}:
         raise ValueError(
@@ -344,24 +357,58 @@ def mlx_call_multi(
         isinstance(tensor, MlxTensorView) for tensor in tensors
     )
     if needs_mps_fence:
-        torch.mps.synchronize()
+        if phase_recorder is None:
+            torch.mps.synchronize()
+        else:
+            measure_phase(phase_recorder, "producer_fence", torch.mps.synchronize)
+        if after_mps_fence is not None:
+            if phase_recorder is None:
+                after_mps_fence()
+            else:
+                measure_phase(phase_recorder, "after_mps_fence_hook", after_mps_fence)
 
-    borrowed: tuple[Any, ...] = tuple(
-        (
-            tensor.array
-            if isinstance(tensor, MlxTensorView)
-            else _torch_to_mlx(tensor.detach(), copy=False, synchronize=False)
+    if phase_recorder is None:
+        borrowed: tuple[Any, ...] = tuple(
+            (
+                tensor.array
+                if isinstance(tensor, MlxTensorView)
+                else _torch_to_mlx(tensor.detach(), copy=False, synchronize=False)
+            )
+            for tensor in tensors
         )
-        for tensor in tensors
-    )
+    else:
+        borrowed = measure_phase(
+            phase_recorder,
+            "input_import",
+            lambda: tuple(
+                (
+                    tensor.array
+                    if isinstance(tensor, MlxTensorView)
+                    else _torch_to_mlx(tensor.detach(), copy=False, synchronize=False)
+                )
+                for tensor in tensors
+            ),
+        )
 
-    if target_device.type == "cpu" and any(
-        array.dtype == mx.float64 for array in borrowed
-    ):
-        with mx.stream(mx.cpu):
+    if phase_recorder is None:
+        if target_device.type == "cpu" and any(
+            array.dtype == mx.float64 for array in borrowed
+        ):
+            with mx.stream(mx.cpu):
+                result = operation(*borrowed)
+        else:
             result = operation(*borrowed)
     else:
-        result = operation(*borrowed)
+
+        def build_graph() -> Any:
+            if target_device.type == "cpu" and any(
+                array.dtype == mx.float64 for array in borrowed
+            ):
+                with mx.stream(mx.cpu):
+                    return operation(*borrowed)
+            return operation(*borrowed)
+
+        result = measure_phase(phase_recorder, "graph_build", build_graph)
     if not isinstance(result, (tuple, list)) or not result:
         raise TypeError(
             "mlx_call_multi operation must return a non-empty tuple or list of MLX arrays"
@@ -370,30 +417,72 @@ def mlx_call_multi(
     if any(not isinstance(array, mx.array) for array in arrays):
         raise TypeError("mlx_call_multi outputs must be MLX arrays")
 
-    # Prepare all outputs before crossing the one shared MLX evaluation
-    # boundary. This is the key difference from calling mlx_to_torch in a
-    # loop, which would fence/evaluate every result separately.
-    arrays = tuple(_prepare_mlx_export(array, target_device, mx) for array in arrays)
-    mx.eval(*arrays)
+    if phase_recorder is None:
+        # Prepare all outputs before crossing the one shared MLX evaluation
+        # boundary.  This is the key difference from calling mlx_to_torch in
+        # a loop, which would fence/evaluate every result separately.
+        arrays = tuple(
+            _prepare_mlx_export(array, target_device, mx) for array in arrays
+        )
+        mx.eval(*arrays)
 
-    # DLPack cannot represent negative strides. Materialize all such outputs
-    # together so even this safety path has one additional evaluation boundary
-    # rather than one boundary per result.
-    negative = tuple(_has_negative_stride(array) for array in arrays)
-    if any(negative):
-        materialized = []
-        for array, needs_materialization in zip(arrays, negative):
-            if needs_materialization:
-                stream = mx.cpu if target_device.type == "cpu" else mx.gpu
-                array = mx.contiguous(array, stream=stream)
-            materialized.append(array)
-        arrays = tuple(materialized)
-        mx.eval(*(array for array, needs in zip(arrays, negative) if needs))
+        # DLPack cannot represent negative strides.  Materialize all such
+        # outputs together so even this safety path has one additional
+        # evaluation boundary rather than one boundary per result.
+        negative = tuple(_has_negative_stride(array) for array in arrays)
+        if any(negative):
+            materialized = []
+            for array, needs_materialization in zip(arrays, negative):
+                if needs_materialization:
+                    stream = mx.cpu if target_device.type == "cpu" else mx.gpu
+                    array = mx.contiguous(array, stream=stream)
+                materialized.append(array)
+            arrays = tuple(materialized)
+            mx.eval(*(array for array, needs in zip(arrays, negative) if needs))
+    else:
 
-    outputs = tuple(
-        _export_evaluated_mlx(array, target_device, mx, materialize_negative=False)
-        for array in arrays
-    )
+        def prepare_and_eval() -> tuple[Any, ...]:
+            # Prepare all outputs before crossing the one shared MLX evaluation
+            # boundary.  This is the key difference from calling mlx_to_torch
+            # in a loop, which would fence/evaluate every result separately.
+            prepared = tuple(
+                _prepare_mlx_export(array, target_device, mx) for array in arrays
+            )
+            mx.eval(*prepared)
+
+            # DLPack cannot represent negative strides.  Materialize all such
+            # outputs together so even this safety path has one additional
+            # evaluation boundary rather than one boundary per result.
+            negative = tuple(_has_negative_stride(array) for array in prepared)
+            if any(negative):
+                materialized = []
+                for array, needs_materialization in zip(prepared, negative):
+                    if needs_materialization:
+                        stream = mx.cpu if target_device.type == "cpu" else mx.gpu
+                        array = mx.contiguous(array, stream=stream)
+                    materialized.append(array)
+                prepared = tuple(materialized)
+                mx.eval(*(array for array, needs in zip(prepared, negative) if needs))
+            return prepared
+
+        arrays = measure_phase(phase_recorder, "prepare_eval", prepare_and_eval)
+
+    if phase_recorder is None:
+        outputs = tuple(
+            _export_evaluated_mlx(array, target_device, mx, materialize_negative=False)
+            for array in arrays
+        )
+    else:
+
+        def export_outputs() -> tuple[torch.Tensor, ...]:
+            return tuple(
+                _export_evaluated_mlx(
+                    array, target_device, mx, materialize_negative=False
+                )
+                for array in arrays
+            )
+
+        outputs = measure_phase(phase_recorder, "dlpack_export", export_outputs)
     # Keep both borrowed MLX views and their Torch owners alive through the
     # final DLPack import.  (The local remains live until function return.)
     _ = borrowed

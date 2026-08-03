@@ -149,6 +149,35 @@ class LogitsProcessorOutput:
     # Scheduler-local output copied alongside the ordinary generation result.
     auxiliary_device_output: Optional[DeviceAuxiliaryOutput] = None
 
+    # A trusted model-side exact greedy result. This is mutually exclusive with
+    # logits and accepted only after ModelRunner revalidates the sampling
+    # contract. Producers must guarantee token IDs are in their logical vocab.
+    # The payload is eager-only: static graph runners reuse captured output
+    # buffers and do not key captures by greedy eligibility.
+    precomputed_greedy_token_ids: Optional[torch.Tensor] = None
+
+    def __post_init__(self):
+        if (
+            self.next_token_logits is not None
+            and self.precomputed_greedy_token_ids is not None
+        ):
+            raise ValueError(
+                "next_token_logits and precomputed_greedy_token_ids are mutually "
+                "exclusive"
+            )
+
+
+def require_graph_compatible_logits_output(
+    output: LogitsProcessorOutput, runner_name: str
+) -> None:
+    """Reject eager-only token payloads at a static graph replay boundary."""
+    if output.precomputed_greedy_token_ids is not None:
+        raise RuntimeError(
+            f"{runner_name} does not support precomputed greedy token outputs; "
+            "static graph buffers are borrowed and graph keys do not encode "
+            "greedy eligibility"
+        )
+
 
 @dataclasses.dataclass
 class LogitsMetadata:

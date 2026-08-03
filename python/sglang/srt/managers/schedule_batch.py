@@ -2048,7 +2048,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # For chunked prefill in PP
     chunked_req: Optional[Req] = None
     chunked_req_next_prompt_token: Optional[int] = None
-    contains_last_prefill_chunk: bool = True
 
     # For DP attention
     inner_idle_batch: Optional[ScheduleBatch] = None
@@ -2154,6 +2153,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Whether this batch is prefill-only (no token generation needed)
     is_prefill_only: bool = False
+
+    # True unless this is a pure middle chunk of one chunked-prefill request.
+    # Consumers may only treat an EXTEND batch as prompt-complete when this is
+    # true; the scheduler overwrites it to false for an intermediate chunk.
+    contains_last_prefill_chunk: bool = True
 
     # Speculative decoding
     spec_algorithm: SpeculativeAlgorithm = None
@@ -3339,6 +3343,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             can_run_dp_breakable_cuda_graph=self.can_run_dp_breakable_cuda_graph,
             is_extend_in_batch=self.is_extend_in_batch,
             is_prefill_only=self.is_prefill_only,
+            contains_last_prefill_chunk=self.contains_last_prefill_chunk,
             seq_lens_cpu=self.seq_lens_cpu,
             enable_overlap=self.enable_overlap,
             mamba_track_indices=self.mamba_track_indices,

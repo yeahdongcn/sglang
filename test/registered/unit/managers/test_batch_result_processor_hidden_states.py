@@ -30,7 +30,6 @@ def _make_processor(case, server_mode: str = "full") -> SchedulerBatchResultProc
         is_generation=True,
         disaggregation_mode=None,
         enable_overlap=False,
-        enable_overlap_mlx=False,
         server_args=SimpleNamespace(
             enable_metrics=False,
             enable_hisparse=False,

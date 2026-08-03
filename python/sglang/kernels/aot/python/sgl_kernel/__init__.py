@@ -3,10 +3,15 @@ import sys
 
 from sgl_kernel.version import __version__  # noqa: F401
 
-# On macOS only the Metal extension is shipped; skip CUDA op loading and
-# re-exports so those symbols are not exposed on Apple Silicon.
+# On macOS only the Torch-loadable Metal library is shipped; skip CUDA op
+# loading and re-exports so those symbols are not exposed on Apple Silicon.
 if sys.platform == "darwin" and platform.machine() == "arm64":
-    from sgl_kernel.metal import *
+    from sgl_kernel.metal import is_metal_aot_available as is_metal_aot_available
+    from sgl_kernel.metal import load_metal_library as load_metal_library
+    from sgl_kernel.metal import metal_library_path as metal_library_path
+    from sgl_kernel.metal import (
+        warmup_qwen3_06b_metal_aot as warmup_qwen3_06b_metal_aot,
+    )
 else:
     import torch
     from sgl_kernel.debug_utils import maybe_wrap_debug_kernel

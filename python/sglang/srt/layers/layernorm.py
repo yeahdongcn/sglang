@@ -774,6 +774,62 @@ class RMSNorm(BaseFusedOp):
         )
         return out
 
+    def forward_mps(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+        post_residual_addition: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Use the narrow Qwen3-0.6B Metal kernel and otherwise stay native."""
+        # Keep the global fused-op override useful for A/B diagnostics.  The
+        # semantic RMSNorm objects are configured once by the MPS model-op
+        # plan, then their pinned per-instance order is used here; this avoids
+        # a direct Metal-JIT bypass that could ignore an independent op gate.
+        from sglang.kernels.fused_op import get_fused_op_backend
+        from sglang.kernels.spec import KernelBackend
+
+        if get_fused_op_backend() is KernelBackend.TORCH:
+            return self.forward_native(x, residual, post_residual_addition)
+        # These options alter either reduction semantics, output dtype, or the
+        # residual contract.  Keep them on the existing Torch implementation.
+        if (
+            not self.has_weight
+            or self.variance_size_override is not None
+            or self.cast_x_before_out_mul
+            or self.fp32_residual
+            or self.override_orig_dtype is not None
+            or post_residual_addition is not None
+            or is_batch_invariant_mode_enabled()
+            or (
+                torch.is_grad_enabled()
+                and (
+                    x.requires_grad
+                    or self.weight.requires_grad
+                    or (residual is not None and residual.requires_grad)
+                )
+            )
+        ):
+            return self.forward_native(x, residual, post_residual_addition)
+
+        from sglang.kernels.ops.layernorm import _FUSED_ADD_RMSNORM, _RMSNORM
+        from sglang.kernels.ops.layernorm._rmsnorm_metal_jit import (
+            can_use_mps_fused_add_rmsnorm,
+            can_use_mps_rmsnorm,
+        )
+
+        weight = self.weight.data
+        if residual is None:
+            if not can_use_mps_rmsnorm(x, weight, self.variance_epsilon):
+                return self.forward_native(x, None, None)
+            return _RMSNORM.forward(x, weight, self.variance_epsilon)
+
+        if not can_use_mps_fused_add_rmsnorm(
+            x, residual, weight, self.variance_epsilon
+        ):
+            return self.forward_native(x, residual, None)
+        _FUSED_ADD_RMSNORM.forward(x, residual, weight, self.variance_epsilon)
+        return x, residual
+
     def forward_native(
         self,
         x: torch.Tensor,

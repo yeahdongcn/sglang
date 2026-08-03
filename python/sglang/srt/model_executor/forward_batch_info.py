@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import MultimodalInputs, ScheduleBatch
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+    from sglang.srt.sampling.sampling_observer import SamplingObserver
     from sglang.srt.speculative.spec_info import SpecInput, SpeculativeAlgorithm
 
 # Warn-once flag for the deprecated skip_attn_backend_init kwarg; see
@@ -438,6 +439,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     return_logprob: bool = False
     # Whether this batch is prefill-only (no token generation needed)
     is_prefill_only: bool = False
+    # True unless the scheduler identified this as a pure intermediate prefill
+    # chunk. Keep hand-built/dummy ForwardBatch instances conservative so they
+    # cannot accidentally enter a prompt-complete fast path.
+    contains_last_prefill_chunk: bool = False
     spec_algorithm: SpeculativeAlgorithm = None
     # For matryoshka embeddings
     dimensions: Optional[list[int]] = None
@@ -474,6 +479,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # === Borrowed from ScheduleBatch: compound (carry their own device tensors) ===
     # Sampling info
     sampling_info: SamplingBatchInfo = None
+    # Invocation-scoped decision made by ModelRunner before model.forward.
+    # None means a direct/custom caller has not resolved the observer yet.
+    sampling_observer_active: Optional[bool] = None
     # Speculative decoding
     spec_info: Optional[SpecInput] = None
 
@@ -792,6 +800,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             can_run_dp_breakable_cuda_graph=batch.can_run_dp_breakable_cuda_graph,
             global_forward_mode=batch.global_forward_mode,
             is_prefill_only=batch.is_prefill_only,
+            contains_last_prefill_chunk=batch.contains_last_prefill_chunk,
             spec_algorithm=batch.spec_algorithm,
             capture_hidden_mode=capture_hidden_mode,
             return_hidden_states_before_norm=return_hidden_states_before_norm,
@@ -1621,11 +1630,28 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         self._pad_inputs_to_size(model_runner, tokens_padded, self.batch_size)
 
     def post_forward_mlp_sync_batch(self, logits_output: LogitsProcessorOutput):
+        padded_bs = self.batch_size
         if self._original_forward_mode is not None:
             self.forward_mode = self._original_forward_mode
         if self._original_batch_size is not None:
             self.batch_size = self._original_batch_size
         bs = self.batch_size
+
+        # Model-side greedy outputs are per request, regardless of whether the
+        # forward itself was decode or extend. Validate that layout before
+        # removing MLP-sync request padding; accepting an arbitrary longer
+        # tensor could silently mistake extend token rows for request rows.
+        if logits_output.precomputed_greedy_token_ids is not None:
+            token_ids = logits_output.precomputed_greedy_token_ids
+            if tuple(token_ids.shape) != (padded_bs,):
+                raise RuntimeError(
+                    "precomputed greedy token IDs must contain exactly one row "
+                    "per padded request before MLP-sync unpadding; "
+                    f"expected {(padded_bs,)}, found {tuple(token_ids.shape)}"
+                )
+            logits_output.precomputed_greedy_token_ids = (
+                logits_output.precomputed_greedy_token_ids[:bs]
+            )
 
         # MLP-sync padding appended dummy rows after the real ones; slice the
         # per-request tensors back so post-forward consumers (seeded sampling,
@@ -1681,20 +1707,112 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 self.out_cache_loc = self.output_cache_loc_backup
 
         elif self.forward_mode.is_decode() or self.forward_mode.is_idle():
-            logits_output.next_token_logits = logits_output.next_token_logits[:bs]
+            if logits_output.next_token_logits is not None:
+                logits_output.next_token_logits = logits_output.next_token_logits[:bs]
             if logits_output.hidden_states is not None:
                 logits_output.hidden_states = logits_output.hidden_states[:bs]
         elif self.forward_mode.is_extend():
             num_tokens = self.seq_lens_sum
-            logits_output.next_token_logits = logits_output.next_token_logits[
-                :num_tokens
-            ]
+            if logits_output.next_token_logits is not None:
+                logits_output.next_token_logits = logits_output.next_token_logits[
+                    :num_tokens
+                ]
             if logits_output.hidden_states is not None:
                 logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
 
     @property
     def can_run_tbo(self):
         return self.tbo_split_seq_index is not None
+
+
+def precomputed_greedy_fallback_reason(
+    forward_batch: ForwardBatch,
+    *,
+    sampling_observer: Optional[SamplingObserver] = None,
+) -> Optional[str]:
+    """Return why a model may not bypass logits-based greedy sampling.
+
+    This contract is device-sync-free. A provider evaluates it before running
+    a token-producing graph; ``ModelRunner`` evaluates it again defensively
+    before accepting that graph's output. ``ModelRunner.forward`` resolves the
+    invocation-scoped observer flag before providers run. An unresolved flag
+    fails closed unless a direct ``sample`` caller supplies the observer here.
+    """
+    mode = getattr(forward_batch, "forward_mode", None)
+    if mode not in (ForwardMode.DECODE, ForwardMode.EXTEND):
+        return "forward_mode"
+    if mode is ForwardMode.EXTEND and not bool(
+        getattr(forward_batch, "contains_last_prefill_chunk", False)
+    ):
+        return "incomplete_prefill_chunk"
+    if bool(getattr(forward_batch, "is_prefill_only", False)):
+        return "prefill_only"
+    if bool(getattr(forward_batch, "return_pooled_hidden_states", False)):
+        return "pooled_hidden_states"
+    if bool(getattr(forward_batch, "return_logprob", False)):
+        return "return_logprob"
+    if any(
+        int(value or 0) > 0
+        for value in (getattr(forward_batch, "top_logprobs_nums", None) or [])
+    ):
+        return "top_logprobs"
+    if any(
+        bool(values)
+        for values in (getattr(forward_batch, "token_ids_logprobs", None) or [])
+    ):
+        return "token_ids_logprobs"
+    if getattr(forward_batch, "multi_item_delimiter_indices", None) is not None:
+        return "multi_item_scoring"
+    if getattr(forward_batch, "spec_info", None) is not None:
+        return "speculative_decoding"
+    if getattr(forward_batch, "capture_hidden_mode", CaptureHiddenMode.NULL) not in (
+        None,
+        CaptureHiddenMode.NULL,
+    ):
+        return "hidden_capture"
+    if bool(getattr(forward_batch, "return_hidden_states_before_norm", False)):
+        return "pre_norm_hidden_capture"
+
+    sampling_info = getattr(forward_batch, "sampling_info", None)
+    if sampling_info is None:
+        return "sampling_info"
+    observer_active = getattr(forward_batch, "sampling_observer_active", None)
+    if observer_active is None:
+        if sampling_observer is None:
+            return "sampling_observer_state"
+        observer_active = sampling_observer.is_active(sampling_info)
+    if bool(observer_active):
+        return "sampling_observer"
+    if not bool(getattr(sampling_info, "is_all_greedy", False)):
+        return "non_greedy_sampling"
+    if bool(getattr(sampling_info, "has_custom_logit_processor", False)):
+        return "custom_logit_processor"
+    if getattr(sampling_info, "custom_logit_processor", None):
+        return "custom_logit_processor"
+    if getattr(sampling_info, "logit_bias", None) is not None:
+        return "logit_bias"
+    grammars = getattr(sampling_info, "grammars", None)
+    if grammars and any(grammar is not None for grammar in grammars):
+        return "grammar"
+    if getattr(sampling_info, "grammar_mask", None) is not None:
+        return "grammar_mask"
+    if any(
+        bool(value)
+        for value in (getattr(sampling_info, "return_sampling_masks", None) or [])
+    ):
+        return "sampling_mask"
+    if getattr(sampling_info, "acc_additive_penalties", None) is not None:
+        return "additive_penalties"
+    if getattr(sampling_info, "acc_scaling_penalties", None) is not None:
+        return "scaling_penalties"
+    penalizer = getattr(sampling_info, "penalizer_orchestrator", None)
+    if penalizer is not None and bool(getattr(penalizer, "is_required", False)):
+        return "penalties"
+    if envs.SGLANG_ENABLE_ASYNC_ASSERT.get():
+        return "async_assert"
+    if envs.SGLANG_SANITIZE_NAN_LOGITS.get():
+        return "nan_sanitization"
+    return None
 
 
 def enable_num_token_non_padded():

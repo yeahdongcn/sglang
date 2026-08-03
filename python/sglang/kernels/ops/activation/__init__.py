@@ -1,10 +1,10 @@
 """Fused gated-activation kernels (``act(x[:h]) * x[h:]``).
 
 Each operator is a :class:`~sglang.kernels.fused_op.BaseFusedOp` with a
-pure-``torch`` reference (``forward_native``) plus AOT (``sgl_kernel``) and
-JIT CUDA backends behind one ``(input, out)`` signature. The JIT backend
-additionally accepts ``expert_ids`` / ``expert_step`` — call
-``forward_jit`` directly when those are needed.
+pure-``torch`` reference (``forward_native``) plus device-specific backends
+behind one ``(input, out)`` signature. The CUDA JIT backend additionally
+accepts ``expert_ids`` / ``expert_step`` — call ``forward_jit`` directly when
+those are needed.
 """
 
 from __future__ import annotations
@@ -26,6 +26,11 @@ if TYPE_CHECKING:
 _ACT_DTYPES = ("float16", "bfloat16")
 _CUDA = frozenset({CapabilityRequirement.CUDA})
 _HIP = frozenset({CapabilityRequirement.HIP})
+_MPS = frozenset({CapabilityRequirement.MPS})
+# The custom Metal launch is slower than Torch's fused MPS path for the
+# single-row decode shape.  Keep it for wider prefill/micro-batches where the
+# launch amortizes; whole-model MLX decode uses a different coarse provider.
+_MPS_SILU_AND_MUL_MIN_ROWS = 8
 # sgl_kernel's gated-activation ops build for CUDA *and* ROCm (production
 # imports them from sgl_kernel on both), so the AOT backend spans both devices
 # — the canonical OR-semantics case that a device-baked backend name couldn't.
@@ -102,27 +107,59 @@ class SiluAndMulOp(_GatedActivationOp):
 
     op = "activation.silu_and_mul"
     kernel_attr = "silu_and_mul"
-    # AOT spans CUDA+HIP; JIT is CUDA; AITER is an opt-in HIP path. By priority,
-    # CUDA resolves to JIT and HIP resolves to AOT (matching production
-    # defaults); AITER is registered and HIP-eligible but sits below AOT, so it
-    # is available for explicit/forced selection without changing the default.
+    # AOT spans CUDA+HIP; JIT is CUDA; AITER is an opt-in HIP path; Metal JIT is
+    # MPS-only. By priority, CUDA resolves to JIT and HIP resolves to AOT
+    # (matching production defaults); adding the MPS backend therefore does not
+    # alter either existing platform's selection.
     priority = (
         KernelBackend.JIT,
         KernelBackend.AOT,
         KernelBackend.AITER,
+        KernelBackend.METAL_JIT,
         KernelBackend.TORCH,
     )
     capabilities = {
         KernelBackend.AOT: _CUDA_HIP,
         KernelBackend.JIT: _CUDA,
         KernelBackend.AITER: _HIP,
+        KernelBackend.METAL_JIT: _MPS,
     }
     descriptions = {
         KernelBackend.AOT: "silu_and_mul (sgl_kernel wheel).",
         KernelBackend.JIT: "silu_and_mul (sglang.kernels.jit).",
         KernelBackend.AITER: "silu_and_mul (aiter, ROCm).",
+        KernelBackend.METAL_JIT: "silu_and_mul (Torch MPS Metal JIT).",
         KernelBackend.TORCH: "silu_and_mul (pure-torch reference).",
     }
+
+    def backend_eligible(self, backend, *args, **kwargs) -> bool:
+        if not super().backend_eligible(backend, *args, **kwargs):
+            return False
+        if backend is not KernelBackend.METAL_JIT:
+            return True
+
+        input = args[0] if args else kwargs.get("input")
+        if (
+            getattr(getattr(input, "device", None), "type", None) != "mps"
+            or str(getattr(input, "dtype", "")) != "torch.bfloat16"
+            or getattr(input, "ndim", 0) != 2
+            or not bool(getattr(input, "is_contiguous", lambda: False)())
+            or input.shape[0] < _MPS_SILU_AND_MUL_MIN_ROWS
+            or input.shape[1] == 0
+            or input.shape[1] % 2
+        ):
+            return False
+
+        out = args[1] if len(args) > 1 else kwargs.get("out")
+        if out is None:
+            return True
+        return (
+            getattr(getattr(out, "device", None), "type", None) == "mps"
+            and str(getattr(out, "dtype", "")) == "torch.bfloat16"
+            and tuple(getattr(out, "shape", ()))
+            == (input.shape[0], input.shape[1] // 2)
+            and bool(getattr(out, "is_contiguous", lambda: False)())
+        )
 
     def _act(self, gate: torch.Tensor) -> torch.Tensor:
         import torch.nn.functional as F
@@ -144,6 +181,15 @@ class SiluAndMulOp(_GatedActivationOp):
         # matching the standard (unclamped) gated-SiLU used elsewhere.
         _aiter_silu_and_mul(out, input, 0.0)
         return out
+
+    def forward_metal_jit(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        from sglang.kernels.ops.activation._silu_and_mul_metal_jit import (
+            silu_and_mul as metal_jit,
+        )
+
+        return metal_jit(input, out)
 
 
 class GeluAndMulOp(_GatedActivationOp):

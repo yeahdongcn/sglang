@@ -270,6 +270,10 @@ class Envs:
     # ===================================================================
     # Runtime configuration and process identity
     # ===================================================================
+    # Raise on bare server_args field assignments after resolution; mutation
+    # must go through ServerArgs.override() (enabled by the test harness).
+    SGLANG_STRICT_CONFIG_MUTATION = EnvBool(False)
+
     # Per-role config-namespace bookkeeping: off / record / enforce (value is
     # validated fail-loud in runtime_context, which resolves it once at import
     # so the read stays dynamo-prunable).
@@ -841,18 +845,6 @@ class Envs:
     SGLANG_OPT_USE_AITER_INDEXER = EnvBool(False)
 
     # ===================================================================
-    # Apple Silicon and MLX
-    # ===================================================================
-    SGLANG_USE_MLX = EnvBool(False)
-    SGLANG_MLX_USE_CUSTOM_ROPE = EnvBool(False)
-    SGLANG_MLX_FUSE_SWIGLU = EnvBool(False)
-    # Number of decode steps between periodic mx.clear_cache() calls.
-    # Set to 0 to disable cache clearing entirely.
-    SGLANG_MLX_CLEAR_CACHE_STEPS = EnvInt(256)
-    # MLX buffer-cache cap in GB.
-    SGLANG_MLX_CACHE_LIMIT_GB = EnvFloat(None)
-
-    # ===================================================================
     # Ascend NPU
     # ===================================================================
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)
@@ -1091,6 +1083,23 @@ class Envs:
     # auto-select by priority. "torch" flips all fused ops to their pure-torch
     # reference implementations for numerical-bug bisection.
     SGLANG_FORCE_FUSED_OP_BACKEND = EnvStr(None)
+
+    # Apple MPS semantic-operator providers.  The Torch ModelRunner remains
+    # the only model/storage owner; each list is ordered best -> fallback,
+    # must end in ``torch``, and is resolved once when the MPS model-op plan is
+    # installed.  Keep Torch as the default so enabling MPS never implicitly
+    # opts a process into an experimental provider.  A provider can be enabled independently, e.g.
+    # ``metal_aot,metal_jit,torch`` for Qwen3 QK-norm/RoPE/KV-store while
+    # leaving Radix decode on ``torch``.
+    SGLANG_MPS_QWEN3_MODEL_FORWARD = EnvTuple(("torch",))
+    SGLANG_MPS_QWEN3_GREEDY_TAIL = EnvTuple(("torch",))
+    SGLANG_MPS_QWEN3_QKNORM_ROPE_STORE = EnvTuple(("torch",))
+    SGLANG_MPS_QWEN3_RADIX_DECODE = EnvTuple(("torch",))
+    SGLANG_MPS_QWEN3_DEFERRED_KV_COMMIT = EnvTuple(("torch",))
+    SGLANG_MPS_RMSNORM = EnvTuple(("torch",))
+    SGLANG_MPS_FUSED_ADD_RMSNORM = EnvTuple(("torch",))
+    SGLANG_MPS_SILU_AND_MUL = EnvTuple(("torch",))
+
     USE_TRITON_W8A8_FP8_KERNEL = EnvBool(False)
     SGLANG_MOE_PADDING = EnvBool(False)
 

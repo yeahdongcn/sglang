@@ -21,21 +21,64 @@ GROUPS = K.ops.__all__
 
 # Representative ops checked as a subset (the registry holds many more).
 EXPECTED = {
-    "activation.silu_and_mul": {"aot", "jit", "aiter", "torch", "torch_compile"},
+    "activation.silu_and_mul": {
+        "aot",
+        "jit",
+        "aiter",
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
     "activation.relu2": {"jit", "torch", "torch_compile"},
-    "layernorm.rmsnorm": {"aot", "jit", "aiter", "torch_npu", "torch", "torch_compile"},
+    "layernorm.rmsnorm": {
+        "aot",
+        "jit",
+        "metal_jit",
+        "aiter",
+        "torch_npu",
+        "torch",
+        "torch_compile",
+    },
+    "layernorm.fused_add_rmsnorm": {
+        "aot",
+        "jit",
+        "metal_jit",
+        "aiter",
+        "torch_npu",
+        "torch",
+        "torch_compile",
+    },
     "layernorm.gemma_rmsnorm": {"aot", "jit", "torch_npu", "torch", "torch_compile"},
     "gemm.fp8_scaled_mm": {"aot"},
     "moe.moe_align_block_size": {"aot", "jit"},
     "quantization.nvfp4_gemm_swiglu_nvfp4_quant": {"cute_dsl"},
     "kvcache.reshape_and_cache_flash": {"triton"},
+    "kvcache.qwen3_deferred_kv_commit": {
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
     "diffusion.apply_group_norm_silu": {"triton"},
+    "attention.qwen3_qknorm_rope_store": {
+        "metal_aot",
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
+    "attention.qwen3_radix_decode": {
+        "metal_aot",
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
+    "attention.qwen3_radix_decode_deferred": {"mlx"},
 }
 
 _CPU = PlatformInfo(device_type="cpu")
 _SM90 = PlatformInfo(device_type="cuda", cuda_arch_major=9, cuda_arch_minor=0)
 _SM100 = PlatformInfo(device_type="cuda", cuda_arch_major=10, cuda_arch_minor=0)
 _HIP = PlatformInfo(device_type="hip")
+_MPS = PlatformInfo(device_type="mps")
 
 
 def test_top_level_exports():
@@ -142,6 +185,363 @@ def test_per_op_backend_subset():
     assert KernelBackend.AITER not in _GELU_AND_MUL.available_backends()
 
 
+def test_qwen3_mps_ops_use_the_unified_selector(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _QKNORM_ROPE_STORE,
+        _RADIX_DECODE,
+        QWEN3_06B_METAL_SPEC,
+    )
+
+    class FakeMpsTensor:
+        device = SimpleNamespace(type="mps")
+
+        def __init__(self, shape, dtype=torch.bfloat16):
+            self.shape = shape
+            self.ndim = len(shape)
+            self.dtype = dtype
+
+        @staticmethod
+        def is_contiguous():
+            return True
+
+    spec = QWEN3_06B_METAL_SPEC
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    monkeypatch.setattr(
+        "sglang.kernels.ops.attention.qwen3_mps.is_qwen3_metal_aot_available",
+        lambda: False,
+    )
+    qkv = FakeMpsTensor((1, spec.qkv_width))
+    weight = FakeMpsTensor((spec.head_dim,))
+    cos_sin = FakeMpsTensor((2, spec.head_dim))
+    index = FakeMpsTensor((1,), dtype=torch.int64)
+    q = FakeMpsTensor((1, spec.num_q_heads, spec.head_dim))
+    pool = FakeMpsTensor((2, spec.num_kv_heads, spec.head_dim))
+    req_to_token = FakeMpsTensor((1, 2), dtype=torch.int32)
+    assert (
+        _QKNORM_ROPE_STORE._resolve_backend(
+            qkv,
+            weight,
+            weight,
+            cos_sin,
+            index,
+            index,
+            q,
+            pool,
+            pool,
+            epsilon=1e-6,
+            spec=spec,
+        )
+        is KernelBackend.METAL_JIT
+    )
+    assert (
+        _RADIX_DECODE._resolve_backend(
+            q,
+            pool,
+            pool,
+            req_to_token,
+            index,
+            index,
+            q,
+            scale=spec.attention_scale,
+        )
+        is KernelBackend.METAL_JIT
+    )
+
+
+def test_qwen3_mps_selector_prefers_available_metal_aot(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _QKNORM_ROPE_STORE,
+        QWEN3_06B_METAL_SPEC,
+    )
+
+    class FakeMpsTensor:
+        device = SimpleNamespace(type="mps")
+
+        def __init__(self, shape, dtype=torch.bfloat16):
+            self.shape = shape
+            self.ndim = len(shape)
+            self.dtype = dtype
+
+        @staticmethod
+        def is_contiguous():
+            return True
+
+    spec = QWEN3_06B_METAL_SPEC
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    monkeypatch.setattr(
+        "sglang.kernels.ops.attention.qwen3_mps.is_qwen3_metal_aot_available",
+        lambda: True,
+    )
+    qkv = FakeMpsTensor((1, spec.qkv_width))
+    weight = FakeMpsTensor((spec.head_dim,))
+    cos_sin = FakeMpsTensor((2, spec.head_dim))
+    index = FakeMpsTensor((1,), dtype=torch.int64)
+    q = FakeMpsTensor((1, spec.num_q_heads, spec.head_dim))
+    pool = FakeMpsTensor((2, spec.num_kv_heads, spec.head_dim))
+
+    assert (
+        _QKNORM_ROPE_STORE._resolve_backend(
+            qkv,
+            weight,
+            weight,
+            cos_sin,
+            index,
+            index,
+            q,
+            pool,
+            pool,
+            epsilon=1e-6,
+            spec=spec,
+        )
+        is KernelBackend.METAL_AOT
+    )
+
+
+def test_qwen3_fixed_metal_spec_drift_falls_back_to_torch(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _QKNORM_ROPE_STORE,
+        _RADIX_DECODE,
+        Qwen3MetalKernelSpec,
+    )
+
+    class FakeMpsTensor:
+        device = SimpleNamespace(type="mps")
+
+        def __init__(self, shape, dtype=torch.bfloat16):
+            self.shape = shape
+            self.ndim = len(shape)
+            self.dtype = dtype
+
+        @staticmethod
+        def is_contiguous():
+            return True
+
+    spec = Qwen3MetalKernelSpec(head_dim=64, num_q_heads=8, num_kv_heads=4)
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    monkeypatch.setattr(
+        "sglang.kernels.ops.attention.qwen3_mps.is_qwen3_metal_aot_available",
+        lambda: True,
+    )
+    qkv = FakeMpsTensor((1, spec.qkv_width))
+    weight = FakeMpsTensor((spec.head_dim,))
+    cos_sin = FakeMpsTensor((2, spec.head_dim))
+    index = FakeMpsTensor((1,), dtype=torch.int64)
+    q = FakeMpsTensor((1, spec.num_q_heads, spec.head_dim))
+    pool = FakeMpsTensor((2, spec.num_kv_heads, spec.head_dim))
+    req_to_token = FakeMpsTensor((1, 2), dtype=torch.int32)
+
+    assert (
+        _QKNORM_ROPE_STORE._resolve_backend(
+            qkv,
+            weight,
+            weight,
+            cos_sin,
+            index,
+            index,
+            q,
+            pool,
+            pool,
+            epsilon=1e-6,
+            spec=spec,
+        )
+        is KernelBackend.TORCH
+    )
+    assert (
+        _RADIX_DECODE._resolve_backend(
+            q,
+            pool,
+            pool,
+            req_to_token,
+            index,
+            index,
+            q,
+            scale=spec.attention_scale,
+            spec=spec,
+        )
+        is KernelBackend.TORCH
+    )
+
+
+def test_qwen3_scale_drift_falls_back_before_metal_dispatch(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _RADIX_DECODE,
+        QWEN3_06B_METAL_SPEC,
+    )
+
+    class FakeMpsTensor:
+        device = SimpleNamespace(type="mps")
+
+        def __init__(self, shape, dtype=torch.bfloat16):
+            self.shape = shape
+            self.ndim = len(shape)
+            self.dtype = dtype
+
+        @staticmethod
+        def is_contiguous():
+            return True
+
+    spec = QWEN3_06B_METAL_SPEC
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    monkeypatch.setattr(
+        "sglang.kernels.ops.attention.qwen3_mps.is_qwen3_metal_aot_available",
+        lambda: True,
+    )
+    q = FakeMpsTensor((1, spec.num_q_heads, spec.head_dim))
+    pool = FakeMpsTensor((2, spec.num_kv_heads, spec.head_dim))
+    req_to_token = FakeMpsTensor((1, 2), dtype=torch.int32)
+    index = FakeMpsTensor((1,), dtype=torch.int64)
+
+    assert (
+        _RADIX_DECODE._resolve_backend(
+            q,
+            pool,
+            pool,
+            req_to_token,
+            index,
+            index,
+            q,
+            scale=spec.attention_scale + 5e-7,
+        )
+        is KernelBackend.TORCH
+    )
+
+
+@pytest.mark.parametrize("epsilon", [0.0, -1e-6, float("nan"), float("inf")])
+def test_qwen3_invalid_rms_epsilon_falls_back_before_metal_dispatch(
+    monkeypatch, epsilon
+):
+    from types import SimpleNamespace
+
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _QKNORM_ROPE_STORE,
+        QWEN3_06B_METAL_SPEC,
+    )
+
+    class FakeMpsTensor:
+        device = SimpleNamespace(type="mps")
+
+        def __init__(self, shape, dtype=torch.bfloat16):
+            self.shape = shape
+            self.ndim = len(shape)
+            self.dtype = dtype
+
+        @staticmethod
+        def is_contiguous():
+            return True
+
+    spec = QWEN3_06B_METAL_SPEC
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    monkeypatch.setattr(
+        "sglang.kernels.ops.attention.qwen3_mps.is_qwen3_metal_aot_available",
+        lambda: True,
+    )
+    qkv = FakeMpsTensor((1, spec.qkv_width))
+    weight = FakeMpsTensor((spec.head_dim,))
+    cos_sin = FakeMpsTensor((2, spec.head_dim))
+    index = FakeMpsTensor((1,), dtype=torch.int64)
+    q = FakeMpsTensor((1, spec.num_q_heads, spec.head_dim))
+    pool = FakeMpsTensor((2, spec.num_kv_heads, spec.head_dim))
+
+    assert (
+        _QKNORM_ROPE_STORE._resolve_backend(
+            qkv,
+            weight,
+            weight,
+            cos_sin,
+            index,
+            index,
+            q,
+            pool,
+            pool,
+            epsilon=epsilon,
+            spec=spec,
+        )
+        is KernelBackend.TORCH
+    )
+
+
+def test_qwen3_mps_selector_falls_back_for_non_mps_tensors(monkeypatch):
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        _QKNORM_ROPE_STORE,
+        QWEN3_06B_METAL_SPEC,
+    )
+
+    spec = QWEN3_06B_METAL_SPEC
+    monkeypatch.setattr(fo, "_platform", lambda: _MPS)
+    qkv = torch.empty(1, spec.qkv_width, dtype=torch.bfloat16)
+    weight = torch.empty(spec.head_dim, dtype=torch.bfloat16)
+    cos_sin = torch.empty(2, spec.head_dim, dtype=torch.bfloat16)
+    positions = torch.zeros(1, dtype=torch.int64)
+    slots = torch.zeros(1, dtype=torch.int64)
+    q_out = torch.empty(1, spec.num_q_heads, spec.head_dim, dtype=torch.bfloat16)
+    pool = torch.empty(2, spec.num_kv_heads, spec.head_dim, dtype=torch.bfloat16)
+    assert (
+        _QKNORM_ROPE_STORE._resolve_backend(
+            qkv,
+            weight,
+            weight,
+            cos_sin,
+            positions,
+            slots,
+            q_out,
+            pool,
+            pool,
+            epsilon=1e-6,
+            spec=spec,
+        )
+        is KernelBackend.TORCH
+    )
+
+
+def test_qwen3_torch_reference_accepts_empty_decode_batch():
+    import torch
+
+    from sglang.kernels.ops.attention.qwen3_mps import (
+        QWEN3_06B_METAL_SPEC,
+        qwen3_radix_decode,
+    )
+
+    spec = QWEN3_06B_METAL_SPEC
+    q = torch.empty(0, spec.num_q_heads, spec.head_dim, dtype=torch.bfloat16)
+    pool = torch.empty(1, spec.num_kv_heads, spec.head_dim, dtype=torch.bfloat16)
+    req_to_token = torch.empty(0, 0, dtype=torch.int32)
+    indices = torch.empty(0, dtype=torch.int64)
+    out = torch.empty_like(q)
+
+    qwen3_radix_decode(
+        q,
+        pool,
+        pool,
+        req_to_token,
+        indices,
+        indices,
+        out,
+        scale=spec.attention_scale,
+        backend=KernelBackend.TORCH,
+    )
+    assert out.shape == q.shape
+
+
 @pytest.mark.parametrize(
     "req, plat, ok",
     [
@@ -149,6 +549,8 @@ def test_per_op_backend_subset():
         (Cap.CUDA, _SM90, True),
         (Cap.CUDA, _HIP, False),
         (Cap.HIP, _HIP, True),
+        (Cap.MPS, _MPS, True),
+        (Cap.MPS, _CPU, False),
         (Cap.cuda(min_sm=(10, 0)), _SM90, False),
         (Cap.cuda(min_sm=(10, 0)), _SM100, True),
         (Cap.cuda(max_sm=(9, 0)), _SM100, False),
@@ -171,6 +573,7 @@ def test_capability_shortcuts():
     assert Cap.CUDA == Cap(device=DeviceType.CUDA)
     assert Cap.HIP == Cap(device=DeviceType.HIP)
     assert Cap.NPU == Cap(device=DeviceType.NPU)
+    assert Cap.MPS == Cap(device=DeviceType.MPS)
     assert {Cap.CUDA, Cap.HIP} == {Cap.HIP, Cap.CUDA}
     assert Cap.cuda(min_sm=(10, 0)) == Cap(
         device=DeviceType.CUDA, min_cuda_arch=(10, 0)
@@ -178,7 +581,7 @@ def test_capability_shortcuts():
 
 
 def test_platform_detect_does_not_raise():
-    assert PlatformInfo.detect().device_type in ("cpu", "cuda", "hip", "npu")
+    assert PlatformInfo.detect().device_type in ("cpu", "cuda", "hip", "npu", "mps")
 
 
 @pytest.mark.parametrize(
@@ -223,9 +626,12 @@ def test_import_stays_metadata_only():
     # Importing the namespace must not pull in the AOT backend (sgl_kernel) or
     # the JIT compilation infra (sglang.kernels.jit), which import torch / nvcc.
     code = (
-        "import sys, sglang.kernels.ops; "
-        "print('DIRTY' if 'sgl_kernel' in sys.modules or any("
-        "m.startswith('sglang.kernels.jit') for m in sys.modules) else 'CLEAN')"
+        "import sys, sglang; "
+        "before=set(sys.modules); "
+        "import sglang.kernels.ops; "
+        "loaded=set(sys.modules)-before; "
+        "print('DIRTY' if 'sgl_kernel' in loaded or any("
+        "m.startswith('sglang.kernels.jit') for m in loaded) else 'CLEAN')"
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
