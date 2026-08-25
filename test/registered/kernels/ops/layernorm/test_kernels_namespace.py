@@ -44,6 +44,12 @@ EXPECTED = {
     "moe.moe_align_block_size": {"aot", "jit"},
     "quantization.nvfp4_gemm_swiglu_nvfp4_quant": {"cute_dsl"},
     "kvcache.reshape_and_cache_flash": {"triton"},
+    "kvcache.qwen3_deferred_kv_commit": {
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
+    "attention.qwen3_radix_decode_deferred": {"mlx"},
     "diffusion.apply_group_norm_silu": {"triton"},
 }
 

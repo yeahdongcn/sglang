@@ -50,6 +50,7 @@ class KernelBackend(str, Enum):
     TORCH_NPU = "torch_npu"  # Ascend NPU vendor runtime (device=NPU)
     METAL_JIT = "metal_jit"  # torch.mps.compile_shader (device=MPS)
     METAL_AOT = "metal_aot"  # Torch-loadable .metallib (device=MPS)
+    MLX = "mlx"  # MLX lazy graph / custom Metal kernel (device=MPS)
     # TODO(RFC #29630): more provenance as needed (cpu-avx, sgl_kernel_npu, ...)
 
 

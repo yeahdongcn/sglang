@@ -53,7 +53,20 @@ def reshape_and_cache_flash(
     )
 
 
-__all__ = ["reshape_and_cache_flash"]
+from sglang.kernels.ops.kvcache.qwen3 import (  # noqa: E402,F401
+    Qwen3DeferredKvCommitOp,
+    qwen3_commit_deferred_kv,
+    set_qwen3_kv_commit_priority,
+    warmup_qwen3_kv_commit,
+)
+
+__all__ = [
+    "Qwen3DeferredKvCommitOp",
+    "qwen3_commit_deferred_kv",
+    "reshape_and_cache_flash",
+    "set_qwen3_kv_commit_priority",
+    "warmup_qwen3_kv_commit",
+]
 
 
 # Other Triton kernels migrated into this group (from attention/mem_cache
