@@ -139,6 +139,29 @@ class MpsSRTPlatform(MpsDeviceMixin, SRTPlatform):
 
         configure_mps_generic_kernels()
 
+    def bind_model_runtime_operators(
+        self,
+        *,
+        model,
+        model_config,
+        server_args,
+        req_to_token_pool,
+        token_to_kv_pool,
+    ) -> object | None:
+        # Keep model modules lazy and out of the platform. Adding support for a
+        # model is a registry entry plus its installer, not a platform branch.
+        from sglang.srt.hardware_backend.mps.model_ops.router import (
+            install_mps_model_operators,
+        )
+
+        return install_mps_model_operators(
+            model,
+            model_config,
+            server_args,
+            req_to_token_pool=req_to_token_pool,
+            token_to_kv_pool=token_to_kv_pool,
+        )
+
     def get_default_attention_backend(self) -> str:
         return "torch_native"
 

@@ -377,6 +377,7 @@ class ModelRunner:
         self.draft_model_idx = draft_model_idx
         self.enable_hisparse = get_memory().enable_hisparse
         self._sampling_observer: Optional[SamplingObserver] = None
+        self.platform_operator_plan = None
 
         self.init_startup_observability()
 
@@ -835,6 +836,9 @@ class ModelRunner:
 
     def alloc_memory_pool(self, memory_pool_config: Optional[MemoryPoolConfig] = None):
         """Allocate KV cache memory pools only (no backends or cuda graphs)."""
+        # Platform providers may retain validated identities for the current
+        # pools. Remove their bindings before replacing that storage.
+        self._close_platform_runtime_operators()
         if memory_pool_config is not None:
             self.memory_pool_config = memory_pool_config
 
@@ -975,8 +979,34 @@ class ModelRunner:
         self.decode_attn_backend = backends.decode_attn_backend
         self.decode_attn_backend_group = backends.decode_attn_backend_group
 
+        self._bind_platform_runtime_operators()
+
         if get_parallel().dcp_enabled and get_parallel().dcp_replicate_q_proj:
             self._prepare_replicated_q_proj()
+
+    def _bind_platform_runtime_operators(self) -> None:
+        """Replace this runner's platform operator plan."""
+        self._close_platform_runtime_operators()
+        plan = current_platform.bind_model_runtime_operators(
+            model=self.model,
+            model_config=self.model_config,
+            server_args=self.server_args,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool=self.token_to_kv_pool,
+        )
+        if plan is not None and not callable(getattr(plan, "close", None)):
+            raise TypeError(
+                "platform runtime operator plan must implement close(); "
+                f"found {type(plan).__name__}"
+            )
+        self.platform_operator_plan = plan
+
+    def _close_platform_runtime_operators(self) -> None:
+        plan = getattr(self, "platform_operator_plan", None)
+        self.platform_operator_plan = None
+        close = getattr(plan, "close", None)
+        if callable(close):
+            close()
 
     def _prepare_replicated_q_proj(self) -> None:
         # --dcp-replicate-q-proj: gather each rank's attn_tp head-shard of
