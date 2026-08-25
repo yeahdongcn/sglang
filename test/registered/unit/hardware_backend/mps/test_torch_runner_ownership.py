@@ -6,10 +6,10 @@ from unittest import mock
 from sglang.benchmark import one_batch
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.server_args import ServerArgs
-from sglang.test.ci.ci_register import register_cpu_ci, register_mlx_ci
+from sglang.test.ci.ci_register import register_cpu_ci, register_mps_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
-register_mlx_ci(est_time=1, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=1, suite="stage-a-unit-test-mps")
 
 
 class TestTorchRunnerOwnership(unittest.TestCase):
