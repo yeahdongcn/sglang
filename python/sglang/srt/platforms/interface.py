@@ -126,6 +126,22 @@ class SRTPlatform(DeviceMixin):
         """One-time backend initialization.  Called in each worker."""
         pass
 
+    def bind_model_runtime_operators(
+        self,
+        *,
+        model,
+        model_config,
+        server_args,
+        req_to_token_pool,
+        token_to_kv_pool,
+    ) -> object | None:
+        """Bind optional operators after the model, pools, and backends exist.
+
+        A non-``None`` result must provide ``close()`` so ModelRunner can remove
+        bindings before storage is replaced or a new plan is installed.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # BaseFusedOp integration
     # ------------------------------------------------------------------

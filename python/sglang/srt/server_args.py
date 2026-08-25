@@ -209,6 +209,7 @@ ATTENTION_BACKEND_CHOICES = [
     "intel_amx",
     "ascend",
     "intel_xpu",
+    "mps",
 ]
 
 # trtllm_mha is valid for decode-only dense-MQA drafts. DFLASH rejects it
@@ -4699,7 +4700,7 @@ class ServerArgs:
     def _validate_standard_mps_server_args(self):
         """Fail before model loading for modes the Torch MPS path cannot run."""
 
-        supported_attention_backends = {None, "torch_native"}
+        supported_attention_backends = {None, "mps", "torch_native"}
         for field in (
             "attention_backend",
             "prefill_attention_backend",
@@ -4711,7 +4712,7 @@ class ServerArgs:
             if normalized not in supported_attention_backends:
                 raise ValueError(
                     "The standard Torch MPS path currently supports only the "
-                    f"torch_native attention backend; got {field}={value!r}"
+                    f"mps or torch_native attention backend; got {field}={value!r}"
                 )
 
         sampling_backend = getattr(self, "sampling_backend", None)
@@ -6355,8 +6356,8 @@ class ServerArgs:
                 return "trtllm_mha"
             elif is_hip():
                 return "aiter"
-            elif is_mps():
-                return "torch_native"
+            elif current_platform.is_mps():
+                return current_platform.get_default_attention_backend()
             else:
                 # FlashInfer does not support attention sinks.
                 if is_flashinfer_available() and not model_config.has_attention_sinks:
@@ -6375,8 +6376,8 @@ class ServerArgs:
                     return "aiter"
                 else:
                     return "triton"
-            elif is_mps():
-                return "torch_native"
+            elif current_platform.is_mps():
+                return current_platform.get_default_attention_backend()
             else:
                 return "triton"
 
@@ -6400,11 +6401,15 @@ class ServerArgs:
         # Split-backend override + default fill.
         run_post_process_pass(self, _attention_backend_default)
 
-        # Torch native and flex attention backends
+        # Torch native, MPS, and flex attention backends
         attention_backend = resolved_view(self).attention_backend
-        if attention_backend == "torch_native":
+        if attention_backend in {"mps", "torch_native"}:
+            backend_display_name = (
+                "MPS" if attention_backend == "mps" else "torch native"
+            )
             logger.warning(
-                "Cuda graph is disabled because of using torch native attention backend"
+                "Cuda graph is disabled because of using %s attention backend",
+                backend_display_name,
             )
             self.cuda_graph_config.decode.backend = Backend.DISABLED
             self.cuda_graph_config.prefill.backend = Backend.DISABLED

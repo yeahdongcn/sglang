@@ -408,7 +408,7 @@ class TestMpsDeviceMixin(CustomTestCase):
         base = MpsSRTPlatform()
         self.assertTrue(base.is_mps())
         self.assertEqual(base.get_device(), torch.device("mps"))
-        self.assertEqual(base.get_default_attention_backend(), "torch_native")
+        self.assertEqual(base.get_default_attention_backend(), "mps")
         self.assertEqual(base.get_torch_distributed_backend_str(), "gloo")
         self.assertFalse(base.is_pin_memory_available())
 

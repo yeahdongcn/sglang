@@ -189,6 +189,7 @@ class TestSplitBackendsReachTheDecisions(CustomTestCase):
         # This is why a base-only read is not merely imprecise: the unset field
         # reads as "supported".
         self.assertTrue(support_triton(None))
+        self.assertFalse(support_triton("mps"))
 
     def test_no_listed_decision_reads_the_base_field_alone(self):
         offenders = []
