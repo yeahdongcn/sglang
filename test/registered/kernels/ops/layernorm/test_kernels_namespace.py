@@ -21,9 +21,24 @@ GROUPS = K.ops.__all__
 
 # Representative ops checked as a subset (the registry holds many more).
 EXPECTED = {
-    "activation.silu_and_mul": {"aot", "jit", "aiter", "torch", "torch_compile"},
+    "activation.silu_and_mul": {
+        "aot",
+        "jit",
+        "aiter",
+        "metal_jit",
+        "torch",
+        "torch_compile",
+    },
     "activation.relu2": {"jit", "torch", "torch_compile"},
-    "layernorm.rmsnorm": {"aot", "jit", "aiter", "torch_npu", "torch", "torch_compile"},
+    "layernorm.rmsnorm": {
+        "aot",
+        "jit",
+        "aiter",
+        "metal_jit",
+        "torch_npu",
+        "torch",
+        "torch_compile",
+    },
     "layernorm.gemma_rmsnorm": {"aot", "jit", "torch_npu", "torch", "torch_compile"},
     "gemm.fp8_scaled_mm": {"aot"},
     "moe.moe_align_block_size": {"aot", "jit"},
@@ -111,6 +126,9 @@ def test_activation_default_backend(monkeypatch, device, expect):
     # silu_and_mul default matches production: jit on CUDA, aot (sgl_kernel) on HIP.
     from sglang.kernels.ops.activation import _SILU_AND_MUL
 
+    # A prior MPS ModelRunner import can install a process-wide per-op gate.
+    # This test asserts the class default, so explicitly restore that state.
+    _SILU_AND_MUL.set_priority(None)
     monkeypatch.setattr(fo, "_platform", lambda: PlatformInfo(device_type=device))
     assert _SILU_AND_MUL.auto_selected_backend().value == expect
 
@@ -130,6 +148,7 @@ def test_layernorm_default_backend(monkeypatch, op_attr, device, expect):
     # Same AOT provenance, different device coverage per op: rmsnorm's AOT is
     # CUDA-only, so HIP falls to aiter and NPU to torch_npu.
     ln = importlib.import_module("sglang.kernels.ops.layernorm")
+    getattr(ln, op_attr).set_priority(None)
     monkeypatch.setattr(fo, "_platform", lambda: PlatformInfo(device_type=device))
     assert getattr(ln, op_attr).auto_selected_backend().value == expect
 

@@ -124,6 +124,7 @@ def test_fused_op_registers_all_backends():
         KernelBackend.JIT,
         KernelBackend.AOT,
         KernelBackend.AITER,
+        KernelBackend.METAL_JIT,
         KernelBackend.TORCH_NPU,
     }
 

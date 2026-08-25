@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 _ACT_DTYPES = ("float16", "bfloat16")
 _CUDA = frozenset({CapabilityRequirement.CUDA})
 _HIP = frozenset({CapabilityRequirement.HIP})
+_MPS = frozenset({CapabilityRequirement.MPS})
+_MPS_SILU_AND_MUL_MIN_ROWS = 8
 # sgl_kernel's gated-activation ops build for CUDA *and* ROCm (production
 # imports them from sgl_kernel on both), so the AOT backend spans both devices
 # — the canonical OR-semantics case that a device-baked backend name couldn't.
@@ -116,13 +118,50 @@ class SiluAndMulOp(_GatedActivationOp):
         KernelBackend.AOT: _CUDA_HIP,
         KernelBackend.JIT: _CUDA,
         KernelBackend.AITER: _HIP,
+        KernelBackend.METAL_JIT: _MPS,
     }
     descriptions = {
         KernelBackend.AOT: "silu_and_mul (sgl_kernel wheel).",
         KernelBackend.JIT: "silu_and_mul (sglang.kernels.jit).",
         KernelBackend.AITER: "silu_and_mul (aiter, ROCm).",
+        KernelBackend.METAL_JIT: "silu_and_mul (Torch MPS Metal JIT).",
         KernelBackend.TORCH: "silu_and_mul (pure-torch reference).",
     }
+
+    def backend_eligible(self, backend, *args, **kwargs) -> bool:
+        if not super().backend_eligible(backend, *args, **kwargs):
+            return False
+        if backend is not KernelBackend.METAL_JIT:
+            return True
+
+        input = args[0] if args else kwargs.get("input")
+        if (
+            getattr(getattr(input, "device", None), "type", None) != "mps"
+            or str(getattr(input, "dtype", "")) != "torch.bfloat16"
+            or getattr(input, "ndim", 0) != 2
+            or not bool(getattr(input, "is_contiguous", lambda: False)())
+            or input.shape[0] < _MPS_SILU_AND_MUL_MIN_ROWS
+            or input.shape[1] == 0
+            or input.shape[1] % 2
+        ):
+            return False
+        import torch
+
+        if torch.is_grad_enabled() and input.requires_grad:
+            return False
+
+        out = args[1] if len(args) > 1 else kwargs.get("out")
+        if out is None:
+            return True
+        if torch.is_grad_enabled() and out.requires_grad:
+            return False
+        return (
+            getattr(getattr(out, "device", None), "type", None) == "mps"
+            and str(getattr(out, "dtype", "")) == "torch.bfloat16"
+            and tuple(getattr(out, "shape", ()))
+            == (input.shape[0], input.shape[1] // 2)
+            and bool(getattr(out, "is_contiguous", lambda: False)())
+        )
 
     def _act(self, gate: torch.Tensor) -> torch.Tensor:
         import torch.nn.functional as F
@@ -144,6 +183,15 @@ class SiluAndMulOp(_GatedActivationOp):
         # matching the standard (unclamped) gated-SiLU used elsewhere.
         _aiter_silu_and_mul(out, input, 0.0)
         return out
+
+    def forward_metal_jit(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        from sglang.kernels.ops.activation._silu_and_mul_metal_jit import (
+            silu_and_mul as metal_jit,
+        )
+
+        return metal_jit(input, out)
 
 
 class GeluAndMulOp(_GatedActivationOp):

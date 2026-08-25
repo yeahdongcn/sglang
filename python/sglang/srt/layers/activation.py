@@ -149,6 +149,11 @@ class SiluAndMul(BaseFusedOp):
         silu_and_mul(x, out)
         return out
 
+    def forward_mps(self, x: torch.Tensor) -> torch.Tensor:
+        from sglang.kernels.ops.activation import silu_and_mul as fused_silu_and_mul
+
+        return fused_silu_and_mul(x)
+
     def forward_aiter(self, x: torch.Tensor, limit: float = 0.0) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
