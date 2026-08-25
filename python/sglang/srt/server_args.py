@@ -58,6 +58,10 @@ from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import
 from sglang.srt.environ import envs
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+from sglang.srt.hardware_backend.mps.runtime import (
+    validate_mps_model_config,
+    validate_mps_runtime,
+)
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.model_executor.cuda_graph_config import (
     ALLOWED_BACKENDS_PER_PHASE,
@@ -1266,7 +1270,7 @@ class ServerArgs:
     # -------------------------------------------------------------------------
     device: A[
         Optional[str],
-        "The device to use ('cuda', 'xpu', 'hpu', 'npu', 'cpu', 'musa'). Defaults to auto-detection if not specified.",
+        "The device to use ('cuda', 'xpu', 'hpu', 'npu', 'cpu', 'musa', 'mps'). Defaults to auto-detection if not specified.",
         NS("device"),
     ] = None
     base_gpu_id: A[
@@ -3988,6 +3992,13 @@ class ServerArgs:
 
         materialize_declarations(self)
 
+        if self.device == "mps" and not use_mlx():
+            self._validate_standard_mps_server_args()
+            validate_mps_model_config(
+                self.get_model_config(),
+                lora_enabled=bool(getattr(self, "enable_lora", False)),
+            )
+
     def _handle_return_hidden_states_mode(self):
         if self.return_hidden_states_mode not in (None, "last", "full"):
             raise ValueError(
@@ -4678,9 +4689,16 @@ class ServerArgs:
     def _handle_hardware_runtime_validation(self):
         # This is intentionally independent of self.device: setting
         # SGLANG_USE_MLX opts into the MLX backend and must fail immediately if
-        # the environment cannot honor that request. With the flag unset,
-        # use_mlx() remains lazy and does not import MLX.
-        use_mlx()
+        # the environment cannot honor that request. Otherwise an explicit or
+        # auto-detected MPS launch validates only the Torch-owned model path.
+        mlx_enabled = use_mlx()
+        requested_device = getattr(self, "device", None)
+        explicitly_mps = requested_device is not None and (
+            str(requested_device).split(":", 1)[0] == "mps"
+        )
+        automatically_mps = requested_device is None and current_platform.is_mps()
+        if not mlx_enabled and (explicitly_mps or automatically_mps):
+            validate_mps_runtime()
 
     def _handle_npu_backends(self):
         if self.device == "npu":
@@ -4703,6 +4721,108 @@ class ServerArgs:
                     "_handle_mps_backends",
                     disable_overlap_schedule=True,
                 )
+                self._declare(
+                    "_handle_mps_backends",
+                    sampling_backend="pytorch",
+                )
+
+    def _validate_standard_mps_server_args(self):
+        """Fail before model loading for modes the Torch MPS path cannot run."""
+
+        supported_attention_backends = {None, "torch_native"}
+        for field in (
+            "attention_backend",
+            "prefill_attention_backend",
+            "decode_attention_backend",
+        ):
+            value = getattr(self, field, None)
+            normalized = getattr(value, "value", value)
+            normalized = None if normalized is None else str(normalized).lower()
+            if normalized not in supported_attention_backends:
+                raise ValueError(
+                    "The standard Torch MPS path currently supports only the "
+                    f"torch_native attention backend; got {field}={value!r}"
+                )
+
+        sampling_backend = getattr(self, "sampling_backend", None)
+        normalized_sampling = getattr(sampling_backend, "value", sampling_backend)
+        normalized_sampling = (
+            None if normalized_sampling is None else str(normalized_sampling).lower()
+        )
+        if normalized_sampling not in {None, "pytorch"}:
+            raise ValueError(
+                "The standard Torch MPS path currently supports only the "
+                f"pytorch sampling backend; got sampling_backend={sampling_backend!r}"
+            )
+
+        kv_cache_dtype = str(getattr(self, "kv_cache_dtype", "auto")).lower()
+        if kv_cache_dtype not in {"auto", "bf16", "bfloat16"}:
+            raise ValueError(
+                "The standard Torch MPS path currently supports only auto/bf16 "
+                f"KV cache dtypes; got kv_cache_dtype={kv_cache_dtype!r}"
+            )
+
+        if envs.SGLANG_USE_HND_KVCACHE.get():
+            raise ValueError(
+                "The standard Torch MPS path requires the NHD KV cache; "
+                "SGLANG_USE_HND_KVCACHE=1 is unsupported"
+            )
+
+        enable_lora = getattr(self, "enable_lora", None)
+        lora_requested = enable_lora is True or (
+            enable_lora is None and bool(getattr(self, "lora_paths", None))
+        )
+        if lora_requested:
+            lora_backend = getattr(self, "lora_backend", "csgmv")
+            if lora_backend != "torch_native":
+                raise ValueError(
+                    "The standard Torch MPS path requires "
+                    "--lora-backend torch_native; "
+                    f"got lora_backend={lora_backend!r}"
+                )
+            if bool(getattr(self, "enable_lora_overlap_loading", False)):
+                raise ValueError(
+                    "The standard Torch MPS path does not yet support LoRA "
+                    "overlap loading"
+                )
+
+        unsupported_flags = (
+            ("dllm_algorithm", "DLLM execution"),
+            ("enable_multimodal", "multimodal serving"),
+            ("speculative_algorithm", "speculative decoding"),
+            ("enable_torch_compile", "torch.compile graph execution"),
+        )
+        for field, feature in unsupported_flags:
+            value = getattr(self, field, None)
+            if value not in (None, False):
+                raise ValueError(
+                    f"The standard Torch MPS path does not yet support {feature}; "
+                    f"got {field}={value!r}"
+                )
+
+        disaggregation_mode = getattr(self, "disaggregation_mode", None)
+        if disaggregation_mode not in (None, "null"):
+            raise ValueError(
+                "The standard Torch MPS path does not yet support disaggregated "
+                f"serving; got disaggregation_mode={disaggregation_mode!r}"
+            )
+
+        quantization = getattr(self, "quantization", None)
+        if quantization not in (None, "unquant"):
+            raise ValueError(
+                "The standard Torch MPS path currently supports only unquantized "
+                f"model weights; got quantization={quantization!r}"
+            )
+
+        if (
+            getattr(self, "tp_size", 1) != 1
+            or getattr(self, "pp_size", 1) != 1
+            or getattr(self, "dp_size", 1) != 1
+        ):
+            raise ValueError(
+                "The standard Torch MPS path requires tp_size=1, pp_size=1, "
+                "and dp_size=1"
+            )
 
     def _handle_xpu_backends(self):
         if self.device == "xpu":
