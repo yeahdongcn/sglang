@@ -163,7 +163,9 @@ class MpsSRTPlatform(MpsDeviceMixin, SRTPlatform):
         )
 
     def get_default_attention_backend(self) -> str:
-        return "torch_native"
+        # This backend is Torch-native unless a model plan binds a Metal decode
+        # provider, so the default does not itself opt into a custom kernel.
+        return "mps"
 
     def get_compile_backend(self, mode: str | None = None) -> str:
         # Torch MPS does not yet have an SGLang graph runner.

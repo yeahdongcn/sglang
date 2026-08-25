@@ -155,6 +155,9 @@ class Qwen3Attention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
         self.alt_stream = alt_stream
+        # Bound after the standard Torch KV pool exists. The provider is a
+        # plain object and owns neither Parameters nor cache storage.
+        self.op_provider = None
 
         self.use_fused_qk_norm_mrope = (
             _has_fused_qk_norm_mrope
@@ -284,6 +287,11 @@ class Qwen3Attention(nn.Module):
         if use_aiter_fused:
             q, k, v = self.forward_prepare_aiter_fused_mrope(
                 positions, hidden_states, forward_batch
+            )
+            save_kv_cache = False
+        elif self.op_provider is not None:
+            q, k, v = self.op_provider.prepare_qkv(
+                self, positions, hidden_states, forward_batch
             )
             save_kv_cache = False
         elif not _is_npu:

@@ -108,7 +108,18 @@ class MpsModelOperatorRegistry:
 
 # Model-specific slices add declarative entries here. Import strings keep their
 # implementations unloaded until an MPS ModelRunner actually selects them.
-MPS_MODEL_OPERATOR_REGISTRY = MpsModelOperatorRegistry()
+MPS_MODEL_OPERATOR_REGISTRY = MpsModelOperatorRegistry(
+    [
+        MpsModelOperatorSpec(
+            name="qwen3_dense_attention",
+            architectures=frozenset({"Qwen3ForCausalLM"}),
+            installer_path=(
+                "sglang.srt.hardware_backend.mps.model_ops.plan:"
+                "install_qwen3_metal_attention"
+            ),
+        )
+    ]
+)
 
 
 __all__ = [
