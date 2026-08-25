@@ -55,23 +55,16 @@ class TestMpsRuntime(unittest.TestCase):
         ):
             runtime.validate_mps_runtime()
 
-    def test_server_args_selects_runtime_gate_by_execution_path(self):
+    def test_server_args_always_validates_the_mps_runtime(self):
         from sglang.srt import server_args
 
         args = types.SimpleNamespace(device="mps")
         with (
-            mock.patch.object(server_args, "use_mlx", return_value=False),
+            mock.patch.dict("os.environ", {"SGLANG_USE_MLX": "1"}),
             mock.patch.object(server_args, "validate_mps_runtime") as validate,
         ):
             server_args.ServerArgs._handle_hardware_runtime_validation(args)
         validate.assert_called_once_with()
-
-        with (
-            mock.patch.object(server_args, "use_mlx", return_value=True),
-            mock.patch.object(server_args, "validate_mps_runtime") as validate,
-        ):
-            server_args.ServerArgs._handle_hardware_runtime_validation(args)
-        validate.assert_not_called()
 
     def test_checkpoint_derived_execution_modes_are_rejected(self):
         self.assertIsNone(
