@@ -32,6 +32,7 @@ register_cpu_ci(est_time=60, suite="base-a-test-cpu")
 
 _CUDA = PlatformInfo(device_type="cuda", cuda_arch_major=9, cuda_arch_minor=0)
 _HIP = PlatformInfo(device_type="hip")
+_MPS = PlatformInfo(device_type="mps")
 _CPU = PlatformInfo()
 
 
@@ -65,6 +66,9 @@ class _AllPlatformsOp(BaseFusedOp):
 
     def forward_hip(self, x):
         return "hip"
+
+    def forward_mps(self, x):
+        return "mps"
 
     def forward_npu(self, x):
         return "npu"
@@ -125,6 +129,28 @@ class _UndeclaredBackendOp(BaseFusedOp):
         return "aiter"
 
 
+class _MetalBackendsOp(BaseFusedOp):
+    op = "test.metal_backends"
+    priority = (
+        KernelBackend.METAL_AOT,
+        KernelBackend.METAL_JIT,
+        KernelBackend.TORCH,
+    )
+    capabilities = {
+        KernelBackend.METAL_AOT: frozenset({Cap.MPS}),
+        KernelBackend.METAL_JIT: frozenset({Cap.MPS}),
+    }
+
+    def forward_native(self, x):
+        return "native"
+
+    def forward_metal_jit(self, x):
+        return "metal_jit"
+
+    def forward_metal_aot(self, x):
+        return "metal_aot"
+
+
 # --- nn.Module contract -------------------------------------------------------
 
 
@@ -151,6 +177,7 @@ def test_is_standard_nn_module(monkeypatch):
     [
         ("cuda", "cuda"),
         ("hip", "hip"),
+        ("mps", "mps"),
         ("npu", "npu"),
         ("xpu", "xpu"),
         ("musa", "musa"),
@@ -167,6 +194,7 @@ def test_platform_forward_dispatch(monkeypatch, key, expect):
     "key, expect",
     [
         ("hip", "cuda"),  # HIP falls back to the CUDA path (hipified kernels)
+        ("mps", "native"),  # MPS requires an explicit forward_mps implementation
         # MUSA has no implicit CUDA fallback: srt kernel imports are gated on
         # is_cuda(), so silently entering forward_cuda on a MUSA box can
         # NameError; ops opt in with an explicit forward_musa instead.
@@ -206,6 +234,23 @@ def test_undeclared_backend_not_auto_selected(monkeypatch):
     assert op(torch.zeros(1)) == "native"
     # ... but stays reachable by explicit request.
     assert op(torch.zeros(1), backend=KernelBackend.AITER) == "aiter"
+
+
+def test_metal_backends_use_mps_capability_and_priority(monkeypatch):
+    _mock_platform(monkeypatch, key="mps", info=_MPS)
+    op = _MetalBackendsOp()
+    assert op.available_backends() == [
+        KernelBackend.TORCH,
+        KernelBackend.TORCH_COMPILE,
+        KernelBackend.METAL_JIT,
+        KernelBackend.METAL_AOT,
+    ]
+    assert op(torch.zeros(1)) == "metal_aot"
+
+
+def test_metal_backends_fall_back_off_mps(monkeypatch):
+    _mock_platform(monkeypatch, key="", info=_CPU)
+    assert _MetalBackendsOp()(torch.zeros(1)) == "native"
 
 
 def test_priority_order_decides_between_backends(monkeypatch):

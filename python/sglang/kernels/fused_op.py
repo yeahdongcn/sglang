@@ -11,14 +11,14 @@ a proper :class:`torch.nn.Module` and covers **two independent dimensions**:
   torch, required), ``forward_torch_compile``, ``forward_triton``,
   ``forward_jit``, ``forward_aot``, ``forward_cute_dsl``,
   ``forward_flashinfer``, ``forward_deepgemm``, ``forward_aiter``,
-  ``forward_torch_npu``. Which *devices* a backend supports is per-``(op,
-  backend)`` metadata (:attr:`BaseFusedOp.capabilities`), never implied by the
-  backend name.
+  ``forward_torch_npu``, ``forward_metal_jit``, ``forward_metal_aot``. Which
+  *devices* a backend supports is per-``(op, backend)`` metadata
+  (:attr:`BaseFusedOp.capabilities`), never implied by the backend name.
 - **Platform / device** — device-specific composite paths inherited from
   ``MultiPlatformOp``: ``forward_cuda``, ``forward_hip``, ``forward_npu``,
-  ``forward_xpu``, ``forward_musa``, ``forward_cpu``, plus ``forward_<key>``
-  for out-of-tree (OOT) platform plugins. CUDA / HIP are **not** kernel
-  backends.
+  ``forward_xpu``, ``forward_mps``, ``forward_musa``, ``forward_cpu``, plus
+  ``forward_<key>`` for out-of-tree (OOT) platform plugins. CUDA / HIP / MPS
+  are **not** kernel backends.
 
 Dispatch priority (highest first), resolved by :meth:`BaseFusedOp.forward`:
 
@@ -38,9 +38,9 @@ Dispatch priority (highest first), resolved by :meth:`BaseFusedOp.forward`:
    per-call shape/dtype gates; overriding it switches this step from a
    statically cached choice to per-call selection.
 5. **Platform-specific forward** — ``forward_cuda`` on CUDA, ``forward_hip``
-   (falling back to ``forward_cuda``) on ROCm, ``forward_musa`` on MUSA,
-   ``forward_npu`` / ``forward_xpu`` on Ascend / XPU, ``forward_cpu`` on
-   AMX-capable CPUs.
+   (falling back to ``forward_cuda``) on ROCm, ``forward_mps`` on Apple MPS,
+   ``forward_musa`` on MUSA, ``forward_npu`` / ``forward_xpu`` on Ascend / XPU,
+   and ``forward_cpu`` on AMX-capable CPUs.
 6. **Native fallback** — ``forward_native``.
 
 Steps 3-6 are static per process, so their outcome is resolved once (lazily,
@@ -112,6 +112,8 @@ BACKEND_METHODS: Dict[KernelBackend, str] = {
     KernelBackend.DEEPGEMM: "forward_deepgemm",
     KernelBackend.AITER: "forward_aiter",
     KernelBackend.TORCH_NPU: "forward_torch_npu",
+    KernelBackend.METAL_JIT: "forward_metal_jit",
+    KernelBackend.METAL_AOT: "forward_metal_aot",
 }
 
 _METHOD_BACKEND_LABELS: Dict[str, str] = {
@@ -129,6 +131,8 @@ DEFAULT_PRIORITY: Tuple[KernelBackend, ...] = (
     KernelBackend.CUTE_DSL,
     KernelBackend.AITER,
     KernelBackend.TORCH_NPU,
+    KernelBackend.METAL_AOT,
+    KernelBackend.METAL_JIT,
     KernelBackend.TRITON,
     KernelBackend.TORCH,
 )
@@ -148,6 +152,7 @@ _ALWAYS_AVAILABLE = (KernelBackend.TORCH, KernelBackend.TORCH_COMPILE)
 _PLATFORM_METHODS: Dict[str, Tuple[str, ...]] = {
     "cuda": ("forward_cuda",),
     "hip": ("forward_hip", "forward_cuda"),
+    "mps": ("forward_mps",),
     "musa": ("forward_musa",),
     "npu": ("forward_npu",),
     "xpu": ("forward_xpu",),
@@ -173,6 +178,7 @@ def _platform_key() -> str:
         is_cpu,
         is_cuda,
         is_hip,
+        is_mps,
         is_musa,
         is_npu,
         is_xpu,
@@ -182,6 +188,8 @@ def _platform_key() -> str:
         return "cuda"
     if is_hip():
         return "hip"
+    if is_mps():
+        return "mps"
     if is_cpu() and cpu_has_amx_support():
         return "cpu"
     if is_npu():
@@ -446,13 +454,19 @@ class BaseFusedOp(nn.Module, ABC):
     def forward_torch_npu(self, *args, **kwargs):
         raise NotImplementedError(f"{self._op_label()}: no torch_npu backend")
 
+    def forward_metal_jit(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._op_label()}: no Metal JIT backend")
+
+    def forward_metal_aot(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._op_label()}: no Metal AOT backend")
+
     def _op_label(self) -> str:
         return self.op or type(self).__name__
 
     # --- platform forwards (forward_cuda / forward_hip / forward_npu /
-    # forward_xpu / forward_musa / forward_cpu) are *not* defined here: a
-    # platform path exists exactly when a subclass defines it, and dispatch
-    # falls back to forward_native otherwise. ---
+    # forward_xpu / forward_mps / forward_musa / forward_cpu) are *not* defined
+    # here: a platform path exists exactly when a subclass defines it, and
+    # dispatch falls back to forward_native otherwise. ---
 
     # --- selection ---
 

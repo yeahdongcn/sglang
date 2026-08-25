@@ -36,6 +36,7 @@ _CPU = PlatformInfo(device_type="cpu")
 _SM90 = PlatformInfo(device_type="cuda", cuda_arch_major=9, cuda_arch_minor=0)
 _SM100 = PlatformInfo(device_type="cuda", cuda_arch_major=10, cuda_arch_minor=0)
 _HIP = PlatformInfo(device_type="hip")
+_MPS = PlatformInfo(device_type="mps")
 
 
 def test_top_level_exports():
@@ -149,6 +150,8 @@ def test_per_op_backend_subset():
         (Cap.CUDA, _SM90, True),
         (Cap.CUDA, _HIP, False),
         (Cap.HIP, _HIP, True),
+        (Cap.MPS, _MPS, True),
+        (Cap.MPS, _CPU, False),
         (Cap.cuda(min_sm=(10, 0)), _SM90, False),
         (Cap.cuda(min_sm=(10, 0)), _SM100, True),
         (Cap.cuda(max_sm=(9, 0)), _SM100, False),
@@ -171,6 +174,7 @@ def test_capability_shortcuts():
     assert Cap.CUDA == Cap(device=DeviceType.CUDA)
     assert Cap.HIP == Cap(device=DeviceType.HIP)
     assert Cap.NPU == Cap(device=DeviceType.NPU)
+    assert Cap.MPS == Cap(device=DeviceType.MPS)
     assert {Cap.CUDA, Cap.HIP} == {Cap.HIP, Cap.CUDA}
     assert Cap.cuda(min_sm=(10, 0)) == Cap(
         device=DeviceType.CUDA, min_cuda_arch=(10, 0)
@@ -178,7 +182,7 @@ def test_capability_shortcuts():
 
 
 def test_platform_detect_does_not_raise():
-    assert PlatformInfo.detect().device_type in ("cpu", "cuda", "hip", "npu")
+    assert PlatformInfo.detect().device_type in ("cpu", "cuda", "hip", "npu", "mps")
 
 
 @pytest.mark.parametrize(
