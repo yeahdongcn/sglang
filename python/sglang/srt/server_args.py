@@ -57,7 +57,6 @@ from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import
 )
 from sglang.srt.environ import envs
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
-from sglang.srt.hardware_backend.mlx.runtime import use_mlx
 from sglang.srt.hardware_backend.mps.runtime import (
     validate_mps_model_config,
     validate_mps_runtime,
@@ -3992,7 +3991,7 @@ class ServerArgs:
 
         materialize_declarations(self)
 
-        if self.device == "mps" and not use_mlx():
+        if self.device == "mps":
             self._validate_standard_mps_server_args()
             validate_mps_model_config(
                 self.get_model_config(),
@@ -4687,17 +4686,12 @@ class ServerArgs:
             )
 
     def _handle_hardware_runtime_validation(self):
-        # This is intentionally independent of self.device: setting
-        # SGLANG_USE_MLX opts into the MLX backend and must fail immediately if
-        # the environment cannot honor that request. Otherwise an explicit or
-        # auto-detected MPS launch validates only the Torch-owned model path.
-        mlx_enabled = use_mlx()
         requested_device = getattr(self, "device", None)
         explicitly_mps = requested_device is not None and (
             str(requested_device).split(":", 1)[0] == "mps"
         )
         automatically_mps = requested_device is None and current_platform.is_mps()
-        if not mlx_enabled and (explicitly_mps or automatically_mps):
+        if explicitly_mps or automatically_mps:
             validate_mps_runtime()
 
     def _handle_npu_backends(self):
@@ -4716,15 +4710,14 @@ class ServerArgs:
 
     def _handle_mps_backends(self):
         if self.device == "mps":
-            if not use_mlx():
-                self._declare(
-                    "_handle_mps_backends",
-                    disable_overlap_schedule=True,
-                )
-                self._declare(
-                    "_handle_mps_backends",
-                    sampling_backend="pytorch",
-                )
+            self._declare(
+                "_handle_mps_backends",
+                disable_overlap_schedule=True,
+            )
+            self._declare(
+                "_handle_mps_backends",
+                sampling_backend="pytorch",
+            )
 
     def _validate_standard_mps_server_args(self):
         """Fail before model loading for modes the Torch MPS path cannot run."""
@@ -6019,32 +6012,27 @@ class ServerArgs:
         elif model_arch in ["GptOssForCausalLM"]:
             # Attention backend selection + XPU dtype validation moved to the
             # override registry (arg_groups/overrides.py: _gpt_oss_overrides).
-            # Exempt MLX only: none of these backends exist on MPS, and MLX runs
-            # attention inside its own runner, so attention_backend is still
-            # unset here.  Plain macOS stays on the list -- torch_native has
-            # neither sliding window nor attention sinks.
-            if not (is_mps() and use_mlx()):
-                supported_backends = [
-                    "triton",
-                    "trtllm_mha",
-                    "fa3",
-                    "fa4",
-                    "ascend",
-                    "intel_amx",
-                    "intel_xpu",
-                    "aiter",
-                ]
-                prefill_attn_backend, decode_attn_backend = (
-                    self._resolved_attention_backends()
-                )
-                assert (
-                    prefill_attn_backend in supported_backends
-                    and decode_attn_backend in supported_backends
-                ), (
-                    f"GptOssForCausalLM requires one of {supported_backends} attention backend, but got the following backends\n"
-                    f"- Prefill: {prefill_attn_backend}\n"
-                    f"- Decode: {decode_attn_backend}\n"
-                )
+            supported_backends = [
+                "triton",
+                "trtllm_mha",
+                "fa3",
+                "fa4",
+                "ascend",
+                "intel_amx",
+                "intel_xpu",
+                "aiter",
+            ]
+            prefill_attn_backend, decode_attn_backend = (
+                self._resolved_attention_backends()
+            )
+            assert (
+                prefill_attn_backend in supported_backends
+                and decode_attn_backend in supported_backends
+            ), (
+                f"GptOssForCausalLM requires one of {supported_backends} attention backend, but got the following backends\n"
+                f"- Prefill: {prefill_attn_backend}\n"
+                f"- Decode: {decode_attn_backend}\n"
+            )
 
             quant_method = get_quantization_config(hf_config)
             is_mxfp4_quant_format = quant_method == "mxfp4"
