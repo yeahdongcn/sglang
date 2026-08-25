@@ -7,7 +7,7 @@ import requests
 import torch
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.ci.ci_register import register_mlx_ci
+from sglang.test.ci.ci_register import register_mps_ci
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -16,7 +16,7 @@ from sglang.test.test_utils import (
     try_cached_model,
 )
 
-register_mlx_ci(est_time=240, suite="stage-b-e2e-mlx")
+register_mps_ci(est_time=240, suite="stage-b-e2e-mps")
 
 MODEL_PATH = os.environ.get("SGLANG_MPS_TEST_MODEL", "Qwen/Qwen3-0.6B")
 

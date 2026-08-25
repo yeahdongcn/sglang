@@ -7,9 +7,9 @@ from unittest import mock
 import torch
 
 from sglang.srt.hardware_backend.mps import runtime
-from sglang.test.ci.ci_register import register_mlx_ci
+from sglang.test.ci.ci_register import register_mps_ci
 
-register_mlx_ci(est_time=1, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=1, suite="stage-a-unit-test-mps")
 
 
 class TestMpsRuntime(unittest.TestCase):
