@@ -42,7 +42,7 @@ if _is_npu:
     ]
     apply_torch_npu_patches(torch_npu, patches)
 elif _is_mps:
-    from sglang.srt.hardware_backend.mlx.profiler import apply_metal_profiler_patches
+    from sglang.srt.hardware_backend.mps.profiler import apply_metal_profiler_patches
 
     apply_metal_profiler_patches()
 

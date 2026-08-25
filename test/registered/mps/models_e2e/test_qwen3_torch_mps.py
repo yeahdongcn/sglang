@@ -45,17 +45,11 @@ class TestQwen3TorchMps(CustomTestCase):
         return response.json()
 
     def test_standard_runner_reuses_radix_cache(self):
-        # The existing MLX CI job exports SGLANG_USE_MLX=1 for legacy tests.
-        # Remove it from this child process so the smoke test exercises the
-        # ordinary TpModelWorker + ModelRunner path explicitly.
-        env = os.environ.copy()
-        env.pop("SGLANG_USE_MLX", None)
         process = popen_launch_server(
             self.model,
             self.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             device="mps",
-            env=env,
             other_args=[
                 "--disable-overlap-schedule",
                 "--attention-backend",

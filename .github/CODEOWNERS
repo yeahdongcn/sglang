@@ -30,7 +30,7 @@
 /python/sglang/srt/eplb @fzyzcjy @ch-wan @xutizhou
 /python/sglang/srt/function_call @JustinTong0323
 /python/sglang/srt/grpc @CatherineSue @slin1237
-/python/sglang/srt/hardware_backend/mlx @yeahdongcn
+/python/sglang/srt/hardware_backend/mps @yeahdongcn
 /python/sglang/srt/hardware_backend/musa @yeahdongcn
 /python/sglang/srt/hardware_backend/npu @ping1jing2 @iforgetmyname @whybeyoung
 /python/sglang/srt/hardware_backend/gpu/quantization @Alisehen

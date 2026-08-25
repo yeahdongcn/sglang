@@ -82,10 +82,9 @@ _CONFIGURED_SIZE_CALL_SITES = {
         "the Indexer be constructed before distributed init"
     ),
     ("srt/managers/scheduler.py", "configured_pp_size"): (
-        "dispatch_event_loop picks the PP event loop; the MLX runner stub never "
-        "initializes torch.distributed, so the live property asserts before the "
-        "MLX loop can start -- the configured leaf answers the same value "
-        "wherever the live groups exist"
+        "dispatch_event_loop picks the PP event loop before the scheduler's "
+        "process groups are guaranteed to exist; the configured leaf answers "
+        "the same value wherever the live groups exist"
     ),
     ("srt/mem_cache/kv_cache_configurator.py", "configured_pp_size"): (
         "decides whether the token capacity needs a cross-PP all-reduce at all; "

@@ -17,7 +17,6 @@ assert norm_infer is not None and RMSNorm is not None
 assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
 """
         env = os.environ.copy()
-        env.pop("SGLANG_USE_MLX", None)
         completed = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,

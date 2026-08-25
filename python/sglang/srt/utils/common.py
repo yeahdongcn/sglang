@@ -3145,9 +3145,9 @@ def kill_itself_when_parent_died():
         libc = ctypes.CDLL("libc.so.6")
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
     elif sys.platform == "darwin":
-        # macOS has no PR_SET_PDEATHSIG equivalent; the MLX backend provides a
-        # kqueue-based watchdog that SIGKILLs this worker once it is orphaned.
-        from sglang.srt.hardware_backend.mlx.parent_watchdog import (
+        # macOS has no PR_SET_PDEATHSIG equivalent; use the kqueue-based
+        # watchdog to SIGKILL this worker once it is orphaned.
+        from sglang.srt.hardware_backend.mps.parent_watchdog import (
             start_parent_death_watcher,
         )
 

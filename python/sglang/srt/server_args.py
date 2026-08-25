@@ -175,10 +175,6 @@ QUANTIZATION_CHOICES = [
     "quark",  # AMD Quark quantizer (FP8 / MXFP4 / Int4FP8 etc.)
     "quark_int4fp8_moe",
     "quark_mxfp4",  # Online MOE + linear quantization (incl. NVFP4 -> MXFP4 requantization).
-    # Apple Silicon MLX backend — on-the-fly quantization of fp16 weights at load
-    # time via mlx.nn.quantize. Only takes effect when SGLANG_USE_MLX=1.
-    "mlx_q4",  # 4 bits, group_size=64 (mlx-community default)
-    "mlx_q8",  # 8 bits, group_size=64
     "unquant",
     "humming",
 ]
@@ -1283,25 +1279,6 @@ class ServerArgs:
         NS("device"),
     ] = 1
     random_seed: A[Optional[int], "The random seed.", NS("device")] = None
-    mlx_enable_sampling: A[
-        bool,
-        (
-            "MLX backend only: sample decode tokens (temperature / top-k / "
-            "top-p / min-p) instead of greedy argmax. Sampling runs inside "
-            "the lazy MLX graph, so it works with the overlap scheduler; "
-            "first tokens from prefill/extend are sampled too. Greedy "
-            "requests keep exact argmax behavior. Also enables on the MLX "
-            "path: grammar vocab masks and custom logit processors (these "
-            "break decode chaining per step; custom processors run on "
-            "pure-decode steps only), logit_bias, output logprobs (sampled "
-            "token / top-k / token_ids; prompt input logprobs are not "
-            "computed), NaN sanitization (SGLANG_SANITIZE_NAN_LOGITS), and "
-            "per-request sampling_seed under "
-            "--enable-deterministic-inference (deterministic within MLX "
-            "only). Penalties are not applied."
-        ),
-        NS("device"),
-    ] = False
     watchdog_timeout: A[
         float,
         "Set watchdog timeout in seconds. If a forward batch takes longer than this, the server will crash to prevent hanging.",

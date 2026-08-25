@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tensor bridge between MLX and PyTorch on Apple silicon.
 
-The MLX backend requires MLX >= 0.32 and PyTorch >= 2.13.  Ordinary
+The optional bridge requires MLX >= 0.32 and PyTorch >= 2.13. Ordinary
 ``torch_to_mlx`` conversion creates an independent MLX allocation.  The
 zero-copy ``mlx_call`` helper is available for a complete MLX operation and
 keeps all borrowed DLPack inputs alive until the result has been evaluated.
