@@ -41,7 +41,6 @@ from sglang.srt.layers.quantization.gptq import (
     GPTQXPUConfig,
 )
 from sglang.srt.layers.quantization.humming import HummingConfig
-from sglang.srt.layers.quantization.mlx import MlxQuantizationConfig
 from sglang.srt.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptFp8Config,
@@ -65,7 +64,6 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_gfx95_supported,
-    is_mps,
     is_npu,
     is_xpu,
 )
@@ -136,14 +134,6 @@ if is_xpu():
         }
     )
 
-
-if is_mps():
-    BASE_QUANTIZATION_METHODS.update(
-        {
-            "mlx_q4": MlxQuantizationConfig,
-            "mlx_q8": MlxQuantizationConfig,
-        }
-    )
 
 # subset of above quant methods, supported on CPU
 CPU_QUANTIZATION_METHODS = {

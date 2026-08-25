@@ -841,18 +841,6 @@ class Envs:
     SGLANG_OPT_USE_AITER_INDEXER = EnvBool(False)
 
     # ===================================================================
-    # Apple Silicon and MLX
-    # ===================================================================
-    SGLANG_USE_MLX = EnvBool(False)
-    SGLANG_MLX_USE_CUSTOM_ROPE = EnvBool(False)
-    SGLANG_MLX_FUSE_SWIGLU = EnvBool(False)
-    # Number of decode steps between periodic mx.clear_cache() calls.
-    # Set to 0 to disable cache clearing entirely.
-    SGLANG_MLX_CLEAR_CACHE_STEPS = EnvInt(256)
-    # MLX buffer-cache cap in GB.
-    SGLANG_MLX_CACHE_LIMIT_GB = EnvFloat(None)
-
-    # ===================================================================
     # Ascend NPU
     # ===================================================================
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)

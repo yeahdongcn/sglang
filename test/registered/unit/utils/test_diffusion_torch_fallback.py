@@ -11,12 +11,12 @@ from sglang.kernels.ops.diffusion.common.fallback_torch import (
     rms_norm_fn_native,
     triton_one_pass_rms_norm_native,
 )
-from sglang.test.ci.ci_register import register_cpu_ci, register_mlx_ci
+from sglang.test.ci.ci_register import register_cpu_ci, register_mps_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
 register_cpu_ci(est_time=1, suite="base-b-test-cpu")
 register_cpu_ci(est_time=1, suite="base-b-test-cpu-arm64")
-register_mlx_ci(est_time=1, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=1, suite="stage-a-unit-test-mps")
 
 
 class TestDiffusionTorchFallback(unittest.TestCase):

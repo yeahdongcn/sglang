@@ -1,4 +1,4 @@
-"""Parent-death watchdog for MLX workers on Apple Silicon.
+"""Parent-death watchdog for SRT workers on Apple Silicon.
 
 macOS has no ``PR_SET_PDEATHSIG`` equivalent, so the kernel will not signal a
 worker process when its parent dies; the worker would be reparented to PID 1
@@ -23,7 +23,7 @@ def start_parent_death_watcher() -> None:
 
     ``SIGKILL`` is sent from this watcher thread and is uncatchable /
     unblockable, so it works even when the main thread is stuck inside a
-    blocking native call (e.g. an MLX/Metal ``mx.eval`` / ``.tolist()``).
+    blocking native call (e.g. a blocking Metal operation).
     """
     original_ppid = os.getppid()
 

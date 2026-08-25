@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -32,7 +31,6 @@ class TestTorchRunnerOwnership(unittest.TestCase):
         torch_runner = mock.MagicMock(max_total_num_tokens=1024)
 
         with (
-            mock.patch.dict(os.environ, {"SGLANG_USE_MLX": "1"}),
             mock.patch.object(one_batch.ModelConfig, "from_server_args"),
             mock.patch.object(
                 one_batch,
@@ -65,7 +63,6 @@ class TestTorchRunnerOwnership(unittest.TestCase):
         worker = object()
 
         with (
-            mock.patch.dict(os.environ, {"SGLANG_USE_MLX": "1"}),
             mock.patch(
                 "sglang.srt.managers.tp_worker.TpModelWorker",
                 return_value=worker,
@@ -81,11 +78,10 @@ class TestTorchRunnerOwnership(unittest.TestCase):
         )
         self.assertIs(scheduler.tp_worker, worker)
 
-    def test_mps_defaults_cannot_be_bypassed_by_legacy_environment(self):
+    def test_mps_defaults_select_the_standard_torch_path(self):
         fake = SimpleNamespace(device="mps", _declare=mock.Mock())
 
-        with mock.patch.dict(os.environ, {"SGLANG_USE_MLX": "1"}):
-            ServerArgs._handle_mps_backends(fake)
+        ServerArgs._handle_mps_backends(fake)
 
         self.assertEqual(
             fake._declare.call_args_list,

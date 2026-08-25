@@ -17,7 +17,4 @@ export const benchmarks = [
   { match: { hw: "b200",    variant: "default", quant: "nvfp4", strategy: "standard", nodes: "single" } },
   { match: { hw: "b200",    variant: "default", quant: "nvfp4", strategy: "dflash",   nodes: "single" } },
 
-  { match: { hw: "mac",     variant: "default", quant: "mlx-q4",       strategy: "standard", nodes: "single" } },
-  { match: { hw: "mac",     variant: "default", quant: "mlx-q4km",     strategy: "standard", nodes: "single" } },
-  { match: { hw: "mac",     variant: "default", quant: "mlx-q4k-dyn",  strategy: "standard", nodes: "single" } },
 ];

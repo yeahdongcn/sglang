@@ -59,10 +59,7 @@ class TestMpsRuntime(unittest.TestCase):
         from sglang.srt import server_args
 
         args = types.SimpleNamespace(device="mps")
-        with (
-            mock.patch.dict("os.environ", {"SGLANG_USE_MLX": "1"}),
-            mock.patch.object(server_args, "validate_mps_runtime") as validate,
-        ):
+        with mock.patch.object(server_args, "validate_mps_runtime") as validate:
             server_args.ServerArgs._handle_hardware_runtime_validation(args)
         validate.assert_called_once_with()
 

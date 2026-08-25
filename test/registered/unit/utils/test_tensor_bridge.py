@@ -19,9 +19,9 @@ from sglang.srt.utils.tensor_bridge import (
     mlx_to_torch,
     torch_to_mlx,
 )
-from sglang.test.ci.ci_register import register_mlx_ci
+from sglang.test.ci.ci_register import register_mps_ci
 
-register_mlx_ci(est_time=2, suite="stage-a-unit-test-mlx")
+register_mps_ci(est_time=2, suite="stage-a-unit-test-mps")
 
 
 def _has_stable_version_at_least(distribution: str, minimum: Version) -> bool:
@@ -50,7 +50,6 @@ assert mlx_to_torch is not None and torch_to_mlx is not None
 assert not any(name == "mlx" or name.startswith("mlx.") for name in sys.modules)
 """
         env = os.environ.copy()
-        env.pop("SGLANG_USE_MLX", None)
         completed = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,

@@ -134,8 +134,6 @@ class XGrammarGrammar(BaseGrammarObject):
 
             torch.ops.npu.apply_token_bitmask(logits, vocab_mask)
         elif logits.device.type == "cpu":
-            # Used by the MLX backend, which builds its additive mask rows
-            # on the CPU before inserting them into the lazy graph.
             from xgrammar import apply_token_bitmask_inplace
 
             apply_token_bitmask_inplace(logits, vocab_mask, backend="cpu")
