@@ -32,6 +32,7 @@ register_cpu_ci(est_time=60, suite="base-a-test-cpu")
 
 _CUDA = PlatformInfo(device_type="cuda", cuda_arch_major=9, cuda_arch_minor=0)
 _HIP = PlatformInfo(device_type="hip")
+_MPS = PlatformInfo(device_type="mps")
 _CPU = PlatformInfo()
 
 
@@ -65,6 +66,9 @@ class _AllPlatformsOp(BaseFusedOp):
 
     def forward_hip(self, x):
         return "hip"
+
+    def forward_mps(self, x):
+        return "mps"
 
     def forward_npu(self, x):
         return "npu"
@@ -125,6 +129,28 @@ class _UndeclaredBackendOp(BaseFusedOp):
         return "aiter"
 
 
+class _MetalBackendsOp(BaseFusedOp):
+    op = "test.metal_backends"
+    priority = (
+        KernelBackend.METAL_AOT,
+        KernelBackend.METAL_JIT,
+        KernelBackend.TORCH,
+    )
+    capabilities = {
+        KernelBackend.METAL_AOT: frozenset({Cap.MPS}),
+        KernelBackend.METAL_JIT: frozenset({Cap.MPS}),
+    }
+
+    def forward_native(self, x):
+        return "native"
+
+    def forward_metal_jit(self, x):
+        return "metal_jit"
+
+    def forward_metal_aot(self, x):
+        return "metal_aot"
+
+
 # --- nn.Module contract -------------------------------------------------------
 
 
@@ -151,6 +177,7 @@ def test_is_standard_nn_module(monkeypatch):
     [
         ("cuda", "cuda"),
         ("hip", "hip"),
+        ("mps", "mps"),
         ("npu", "npu"),
         ("xpu", "xpu"),
         ("musa", "musa"),
@@ -167,6 +194,7 @@ def test_platform_forward_dispatch(monkeypatch, key, expect):
     "key, expect",
     [
         ("hip", "cuda"),  # HIP falls back to the CUDA path (hipified kernels)
+        ("mps", "native"),  # MPS requires an explicit forward_mps implementation
         # MUSA has no implicit CUDA fallback: srt kernel imports are gated on
         # is_cuda(), so silently entering forward_cuda on a MUSA box can
         # NameError; ops opt in with an explicit forward_musa instead.
@@ -206,6 +234,23 @@ def test_undeclared_backend_not_auto_selected(monkeypatch):
     assert op(torch.zeros(1)) == "native"
     # ... but stays reachable by explicit request.
     assert op(torch.zeros(1), backend=KernelBackend.AITER) == "aiter"
+
+
+def test_metal_backends_use_mps_capability_and_priority(monkeypatch):
+    _mock_platform(monkeypatch, key="mps", info=_MPS)
+    op = _MetalBackendsOp()
+    assert op.available_backends() == [
+        KernelBackend.TORCH,
+        KernelBackend.TORCH_COMPILE,
+        KernelBackend.METAL_JIT,
+        KernelBackend.METAL_AOT,
+    ]
+    assert op(torch.zeros(1)) == "metal_aot"
+
+
+def test_metal_backends_fall_back_off_mps(monkeypatch):
+    _mock_platform(monkeypatch, key="", info=_CPU)
+    assert _MetalBackendsOp()(torch.zeros(1)) == "native"
 
 
 def test_priority_order_decides_between_backends(monkeypatch):
@@ -379,6 +424,47 @@ def test_backend_eligible_override_gates_per_call(monkeypatch):
     assert op(torch.zeros(4)) == "jit"
     assert op(torch.zeros(3)) == "native"  # same instance, per-call bounce
     assert op(torch.zeros(8)) == "jit"
+
+
+def test_instance_priority_is_an_ordered_gate(monkeypatch):
+    class _Gated(BaseFusedOp):
+        op = "test.instance_priority"
+        priority = (KernelBackend.JIT, KernelBackend.TORCH)
+        capabilities = {KernelBackend.JIT: frozenset()}
+
+        def forward_native(self, x):
+            return "native"
+
+        def forward_jit(self, x):
+            return "jit"
+
+    _mock_platform(monkeypatch, key="", info=_CPU)
+    op = _Gated()
+    assert op(torch.zeros(1)) == "jit"
+
+    op.set_priority((KernelBackend.TORCH,))
+    fo.enable_fused_op_trace()
+    assert op(torch.zeros(1)) == "native"
+    assert fo.get_fused_op_trace()[-1].backend == KernelBackend.TORCH.value
+    fo.disable_fused_op_trace()
+    fo.clear_fused_op_trace()
+
+    op.set_priority((KernelBackend.JIT, KernelBackend.TORCH))
+    assert op(torch.zeros(1)) == "jit"
+
+    op.set_priority(None)
+    assert op.get_priority() == _Gated.priority
+    assert op(torch.zeros(1)) == "jit"
+
+
+def test_instance_priority_rejects_typos_duplicates_and_missing_backends():
+    op = _NativeOnlyOp()
+    with pytest.raises(ValueError, match="unknown fused-op backend"):
+        op.set_priority(("not-a-backend",))
+    with pytest.raises(ValueError, match="duplicate fused-op backend"):
+        op.set_priority((KernelBackend.TORCH, KernelBackend.TORCH))
+    with pytest.raises(ValueError, match="not implemented"):
+        op.set_priority((KernelBackend.METAL_JIT, KernelBackend.TORCH))
 
 
 # --- torch.compile protocol -----------------------------------------------------
