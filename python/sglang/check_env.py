@@ -507,7 +507,7 @@ class MUSAEnv(BaseEnv):
 class MPSEnv(BaseEnv):
     """Environment checker for Apple Silicon MPS"""
 
-    EXTRA_PACKAGE_LIST = []
+    EXTRA_PACKAGE_LIST = ["mlx", "mlx-metal"]
 
     def __init__(self):
         super().__init__()

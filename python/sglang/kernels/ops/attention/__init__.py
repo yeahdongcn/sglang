@@ -7,7 +7,12 @@ KV-cache index/write kernels went to the ``kvcache`` group instead.
 """
 
 from sglang.kernels.registry import register_kernel
-from sglang.kernels.spec import KernelBackend, KernelSpec
+from sglang.kernels.spec import (
+    CapabilityRequirement,
+    FormatSignature,
+    KernelBackend,
+    KernelSpec,
+)
 
 # (module, public_fn) migrated from layers/attention/triton_ops + model_executor.
 _TRITON_KERNELS = [
@@ -43,6 +48,10 @@ for _mod, _fn in _TRITON_KERNELS:
     )
 del _mod, _fn
 
+from sglang.kernels.ops.attention.qwen3_mlx import (  # noqa: E402,F401
+    qwen3_radix_decode_deferred,
+    warmup_qwen3_radix_decode_deferred,
+)
 from sglang.kernels.ops.attention.qwen3_mps import (  # noqa: E402,F401
     Qwen3QKNormRopeStoreOp,
     Qwen3RadixDecodeOp,
@@ -50,11 +59,27 @@ from sglang.kernels.ops.attention.qwen3_mps import (  # noqa: E402,F401
     qwen3_radix_decode,
 )
 
+register_kernel(
+    KernelSpec(
+        op="attention.qwen3_radix_decode_deferred",
+        backend=KernelBackend.MLX,
+        target="sglang.kernels.ops.attention.qwen3_mlx:qwen3_radix_decode_deferred",
+        capabilities=frozenset({CapabilityRequirement.MPS}),
+        format_signature=FormatSignature(
+            supported_dtypes=("bfloat16",),
+            description="Qwen3 MLX-island decode before deferred KV commit",
+        ),
+        description="MLX custom Metal decode over borrowed Torch Radix storage",
+    )
+)
+
 __all__ = [
     "Qwen3QKNormRopeStoreOp",
     "Qwen3RadixDecodeOp",
     "qwen3_qknorm_rope_store",
+    "qwen3_radix_decode_deferred",
     "qwen3_radix_decode",
+    "warmup_qwen3_radix_decode_deferred",
 ]
 
 
