@@ -426,6 +426,47 @@ def test_backend_eligible_override_gates_per_call(monkeypatch):
     assert op(torch.zeros(8)) == "jit"
 
 
+def test_instance_priority_is_an_ordered_gate(monkeypatch):
+    class _Gated(BaseFusedOp):
+        op = "test.instance_priority"
+        priority = (KernelBackend.JIT, KernelBackend.TORCH)
+        capabilities = {KernelBackend.JIT: frozenset()}
+
+        def forward_native(self, x):
+            return "native"
+
+        def forward_jit(self, x):
+            return "jit"
+
+    _mock_platform(monkeypatch, key="", info=_CPU)
+    op = _Gated()
+    assert op(torch.zeros(1)) == "jit"
+
+    op.set_priority((KernelBackend.TORCH,))
+    fo.enable_fused_op_trace()
+    assert op(torch.zeros(1)) == "native"
+    assert fo.get_fused_op_trace()[-1].backend == KernelBackend.TORCH.value
+    fo.disable_fused_op_trace()
+    fo.clear_fused_op_trace()
+
+    op.set_priority((KernelBackend.JIT, KernelBackend.TORCH))
+    assert op(torch.zeros(1)) == "jit"
+
+    op.set_priority(None)
+    assert op.get_priority() == _Gated.priority
+    assert op(torch.zeros(1)) == "jit"
+
+
+def test_instance_priority_rejects_typos_duplicates_and_missing_backends():
+    op = _NativeOnlyOp()
+    with pytest.raises(ValueError, match="unknown fused-op backend"):
+        op.set_priority(("not-a-backend",))
+    with pytest.raises(ValueError, match="duplicate fused-op backend"):
+        op.set_priority((KernelBackend.TORCH, KernelBackend.TORCH))
+    with pytest.raises(ValueError, match="not implemented"):
+        op.set_priority((KernelBackend.METAL_JIT, KernelBackend.TORCH))
+
+
 # --- torch.compile protocol -----------------------------------------------------
 
 

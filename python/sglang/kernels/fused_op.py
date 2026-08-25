@@ -31,8 +31,9 @@ Dispatch priority (highest first), resolved by :meth:`BaseFusedOp.forward`:
 3. **OOT platform override** — on an out-of-tree platform, a forward
    registered via :meth:`BaseFusedOp.register_oot_forward`, then a
    ``forward_<dispatch_key>`` method, then ``forward_native``.
-4. **Optimized kernel backends** — the first backend in :attr:`priority`
-   whose method is overridden, that is *declared* in :attr:`capabilities`,
+4. **Optimized kernel backends** — the first backend in the effective
+   per-instance priority whose method is overridden and is declared in
+   :attr:`capabilities`,
    and whose :class:`~sglang.kernels.spec.CapabilityRequirement` set matches
    the detected platform. Ops may extend :meth:`backend_eligible` with
    per-call shape/dtype gates; overriding it switches this step from a
@@ -56,6 +57,11 @@ compile-safe path (``forward_native`` by default; see
 :meth:`leave_torch_compile` restores the original dispatch. Both are
 idempotent because one module instance may be shared by many layers.
 
+An instance may replace its class-level automatic order with
+:meth:`BaseFusedOp.set_priority`. This is an ordered per-op gate: an explicit
+``torch`` entry stops selection at the native reference, while omitted
+providers cannot be auto-selected for that instance.
+
 Like the rest of ``sglang.kernels``, importing this module (and instantiating
 subclasses) never imports a kernel backend (``sgl_kernel`` /
 ``sglang.kernels.jit``), performs platform detection, or triggers JIT
@@ -74,10 +80,12 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
     Tuple,
+    Union,
 )
 
 import msgspec
@@ -358,10 +366,11 @@ class BaseFusedOp(nn.Module, ABC):
         Required for :func:`register_fused_op`; layer-style subclasses that
         are not registered in the kernel registry may leave it empty.
     priority:
-        Kernel-backend preference for auto-selection, best first. Defaults to
-        :data:`DEFAULT_PRIORITY`. ``KernelBackend.TORCH`` entries are ignored:
-        the native reference is always the final fallback, after
-        platform-specific forwards.
+        Class-level kernel-backend preference for auto-selection, best first.
+        Defaults to :data:`DEFAULT_PRIORITY`; use :meth:`set_priority` for an
+        instance override. A class-default ``KernelBackend.TORCH`` remains the
+        final fallback, while an explicit instance ``torch`` entry is an
+        ordered cutoff.
     capabilities:
         Per-backend set of :class:`CapabilityRequirement` (OR semantics;
         an empty set value = runs on any device), consulted by
@@ -400,6 +409,8 @@ class BaseFusedOp(nn.Module, ABC):
 
     def __init__(self) -> None:
         super().__init__()
+        self._priority = self._normalize_priority(self.priority)
+        self._priority_overridden = False
         # Statically resolved dispatch target (priority steps 3-6). ``None``
         # means "not resolved yet": resolution is deferred to the first call
         # so module-level op instances never trigger platform detection at
@@ -409,6 +420,85 @@ class BaseFusedOp(nn.Module, ABC):
         self._original_forward_method: Optional[Callable] = None
         self.is_torch_compile = False
         self._compiled_native = None
+
+    @staticmethod
+    def _normalize_priority(
+        priority: Union[
+            KernelBackend,
+            str,
+            Iterable[Union[KernelBackend, str]],
+        ],
+    ) -> Tuple[KernelBackend, ...]:
+        """Normalize one instance's ordered backend declaration."""
+        if isinstance(priority, KernelBackend):
+            values = (priority,)
+        elif isinstance(priority, str):
+            values = tuple(part.strip() for part in priority.split(",") if part.strip())
+        else:
+            try:
+                values = tuple(priority)
+            except TypeError as exc:
+                raise TypeError(
+                    "fused-op priority must be a backend or an iterable of backends"
+                ) from exc
+
+        normalized = []
+        seen = set()
+        for value in values:
+            try:
+                backend = (
+                    value if isinstance(value, KernelBackend) else KernelBackend(value)
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"unknown fused-op backend in priority: {value!r}"
+                ) from exc
+            if backend in seen:
+                raise ValueError(
+                    f"duplicate fused-op backend in priority: {backend.value!r}"
+                )
+            seen.add(backend)
+            normalized.append(backend)
+        return tuple(normalized)
+
+    def set_priority(
+        self,
+        priority: Optional[
+            Union[
+                KernelBackend,
+                str,
+                Iterable[Union[KernelBackend, str]],
+            ]
+        ],
+    ) -> None:
+        """Override automatic backend order for this operator instance.
+
+        Passing ``None`` restores the class declaration.  In an explicit
+        override, ``torch`` is an ordered cutoff instead of being silently
+        skipped, so ``("torch",)`` is a reliable per-operator off switch.
+        """
+        if priority is None:
+            normalized = self._normalize_priority(self.priority)
+        else:
+            normalized = self._normalize_priority(priority)
+            available = set(self.available_backends())
+            unavailable = tuple(item for item in normalized if item not in available)
+            if unavailable:
+                names = ", ".join(repr(item.value) for item in unavailable)
+                raise ValueError(
+                    f"{self._op_label()}: priority backend(s) not implemented: {names}"
+                )
+
+        self._priority = normalized
+        self._priority_overridden = priority is not None
+        if self.is_torch_compile:
+            self._original_forward_method = None
+        else:
+            self._forward_method = None
+
+    def get_priority(self) -> Tuple[KernelBackend, ...]:
+        """Return this instance's effective automatic backend order."""
+        return self._priority
 
     def _defined_method(self, method_name: str) -> Optional[Callable]:
         """The bound method if any class below ``BaseFusedOp`` defines it."""
@@ -503,8 +593,10 @@ class BaseFusedOp(nn.Module, ABC):
         the native reference is the final fallback after platform forwards.
         """
         candidates = []
-        for backend in self.priority:
+        for backend in self._priority:
             if backend is KernelBackend.TORCH:
+                if self._priority_overridden:
+                    candidates.append(backend)
                 continue
             if backend is KernelBackend.TORCH_COMPILE:
                 candidates.append(backend)
@@ -577,11 +669,16 @@ class BaseFusedOp(nn.Module, ABC):
 
     def _forward_backend_dynamic(self, *args, **kwargs):
         """Per-call backend selection for ops with input-dependent gates."""
+        method = self._resolve_dynamic_forward_method(*args, **kwargs)
+        return method(*args, **kwargs)
+
+    def _resolve_dynamic_forward_method(self, *args, **kwargs) -> Callable:
+        """Resolve one dynamic call without evaluating eligibility twice."""
         for backend in self._dynamic_backend_candidates:
             if self.backend_eligible(backend, *args, **kwargs):
-                return getattr(self, BACKEND_METHODS[backend])(*args, **kwargs)
+                return getattr(self, BACKEND_METHODS[backend])
         method = self._platform_method(_platform_key())
-        return (method or self.forward_native)(*args, **kwargs)
+        return method or self.forward_native
 
     def dispatch_forward(self) -> Callable:
         """The static dispatch target for this op on the current platform."""
@@ -665,6 +762,8 @@ class BaseFusedOp(nn.Module, ABC):
         method = self._forward_method
         if method is None:
             method = self._forward_method = self._resolve_forward_method()
+        if getattr(method, "__func__", None) is BaseFusedOp._forward_backend_dynamic:
+            method = self._resolve_dynamic_forward_method(*args, **kwargs)
         result = method(*args, **kwargs)
         if _trace_enabled:
             _record_trace(self, _dispatch_label(method), args, kwargs)
