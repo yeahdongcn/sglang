@@ -2212,7 +2212,8 @@ def _execute_server_warmup(server_args: ServerArgs):
 
     model_info = res.json()
 
-    # Construct a warmup request (MLX: text warmup for VLM-advertising models; TODO: enable image warmup).
+    # Construct a warmup request (MPS: text warmup for VLM-advertising models;
+    # TODO: enable image warmup).
     # A language-only worker may advertise VLM capability for encoder
     # disaggregation, but its local warmup must stay on the text path.
     is_vlm = (

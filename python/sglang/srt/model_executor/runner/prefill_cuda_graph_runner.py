@@ -68,7 +68,10 @@ from sglang.srt.layers.dp_attention import (
     set_dp_buffer_len,
     set_is_extend_in_batch,
 )
-from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.layers.logits_processor import (
+    LogitsProcessorOutput,
+    require_graph_compatible_logits_output,
+)
 from sglang.srt.layers.pooler import EmbeddingPoolerOutput
 from sglang.srt.layers.utils.cp_utils import is_mla_prefill_cp_enabled
 from sglang.srt.model_executor.cuda_graph_buffer_registry import (
@@ -1730,6 +1733,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     def _trim_logits_output(
         self, output: LogitsProcessorOutput
     ) -> LogitsProcessorOutput:
+        require_graph_compatible_logits_output(output, "PrefillCudaGraphRunner")
         # Preserve mm_input_embeds for speculative decoding.
         mm_input_embeds = None
         if (

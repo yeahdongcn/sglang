@@ -30,6 +30,7 @@ from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.lora.backend.base_backend import BaseLoRABackend
 from sglang.srt.lora.lora_config import LoRAConfig
 from sglang.srt.model_loader.loader import DefaultModelLoader
+from sglang.srt.utils import is_pin_memory_available
 from sglang.srt.utils.hf_transformers_utils import AutoConfig
 
 # Matches both per-expert keys ("...experts.0.<module>...") and shared-outer
@@ -528,6 +529,8 @@ class LoRAAdapter(nn.Module):
                 weights.pop(kv_a_name)
 
     def pin_weights_in_cpu(self):
+        if not is_pin_memory_available():
+            return
         for layer in self.layers:
             for name, weight in layer.weights.items():
                 layer.weights[name] = weight.pin_memory()

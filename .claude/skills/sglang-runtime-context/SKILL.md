@@ -342,11 +342,11 @@ pretends to be `server_args`. Prefer the context override even where a
 single-accessor stub would work — `override_server_args(...)` composed with the
 scoped bag / `get_parallel()` overrides expresses the *cause* (the configuration)
 rather than pinning one helper's answer, and it keeps working when a reader
-migrates between the accessor and the leaf. The sweep converted the last two
-accessor stubs to exactly that shape (`test_attention_patching.py` publishes the
-non-lazy strategy; `test_kimi_k3_vision.py` publishes `tp_size` and forces the
-live topology through `get_parallel().override`), so no test stubs an accessor
-today. Stubbing one *named accessor* remains a last resort for a case that
+migrates between the accessor and the leaf. The sweep converted the remaining
+accessor stubs to exactly that shape (for example, `test_kimi_k3_vision.py`
+publishes `tp_size` and forces the live topology through
+`get_parallel().override`), so no test stubs an accessor today. Stubbing one
+*named accessor* remains a last resort for a case that
 isolates one branch of one helper where no published config can reach it —
 if you do it, say so in the test.
 

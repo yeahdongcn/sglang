@@ -143,6 +143,11 @@ class EagleDraftWorkerBase(ABC):
             num_steps, dtype=torch.long, device=self.device
         ).repeat(max_bs, 1)
 
+    def close_platform_operators(self) -> None:
+        close = getattr(self.draft_worker, "close_platform_operators", None)
+        if callable(close):
+            close()
+
 
 class BaseSpecWorker(ABC):
     _hicache_draft_plan = HiCacheDraftPlan()
@@ -292,6 +297,13 @@ class BaseSpecWorker(ABC):
     def init_cuda_graphs(self):
         if self.draft_worker is not None:
             self.draft_worker.init_cuda_graphs()
+
+    def close_platform_operators(self) -> None:
+        if self.draft_worker is None:
+            return
+        close = getattr(self.draft_worker, "close_platform_operators", None)
+        if callable(close):
+            close()
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         for runner in self.draft_worker.draft_runners:

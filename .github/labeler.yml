@@ -163,5 +163,5 @@ apple-silicon:
     - any-glob-to-any-file:
       - '**/*metal*'
       - '**/*mlx*'
-      - '**/mlx/**'
       - '**/*mps*'
+      - '**/mps/**'

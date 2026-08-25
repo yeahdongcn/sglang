@@ -71,9 +71,13 @@ _BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch", "ascend"}
 class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
-        self.tp_sync_group = get_tp_group().device_group
+        tp_group = get_tp_group()
+        self.tp_sync_group = tp_group.device_group
+        self.tp_sync_world_size = tp_group.world_size
         if is_dp_attention_enabled():
-            self.tp_sync_group = get_parallel().attn_tp_group.device_group
+            attn_tp_group = get_parallel().attn_tp_group
+            self.tp_sync_group = attn_tp_group.device_group
+            self.tp_sync_world_size = attn_tp_group.world_size
 
         self.rl_on_policy_target = get_exec().deterministic.rl_on_policy_target
         # In RL on-policy mode, deterministic inference is automatically enabled.
@@ -94,6 +98,51 @@ class Sampler(nn.Module):
             apply_custom_logit_processor(logits, sampling_info)
         sanitize_nan_logits(logits, "sampler: next_token_logits")
         return logits
+
+    def finalize_precomputed_greedy_token_ids(
+        self,
+        token_ids: torch.Tensor,
+        sampling_info: SamplingBatchInfo,
+        *,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Validate an internal argmax payload and run the token finalizer.
+
+        The producer owns the vocabulary-range invariant. Checking values here
+        would add a device reduction/synchronization to the fast path.
+        """
+        if not isinstance(token_ids, torch.Tensor):
+            raise TypeError("precomputed greedy token IDs must be a Torch tensor")
+        if token_ids.dtype != torch.int64:
+            raise RuntimeError(
+                "precomputed greedy token IDs must have dtype torch.int64; "
+                f"found {token_ids.dtype}"
+            )
+        if tuple(token_ids.shape) != (batch_size,):
+            raise RuntimeError(
+                "precomputed greedy token IDs must have shape [batch_size]; "
+                f"expected {(batch_size,)}, found {tuple(token_ids.shape)}"
+            )
+        if not token_ids.is_contiguous():
+            raise RuntimeError("precomputed greedy token IDs must be contiguous")
+        sampling_tensor = getattr(sampling_info, "temperatures", None)
+        expected_device = (
+            sampling_tensor.device
+            if isinstance(sampling_tensor, torch.Tensor)
+            else torch.device(sampling_info.device)
+        )
+        device_matches = token_ids.device == expected_device
+        if expected_device.index is None:
+            device_matches = token_ids.device.type == expected_device.type
+        if not device_matches:
+            raise RuntimeError(
+                "precomputed greedy token IDs are on the wrong device: "
+                f"expected {expected_device}, found {token_ids.device}"
+            )
+        if not sampling_info.is_all_greedy:
+            raise RuntimeError("precomputed token IDs require an all-greedy batch")
+        self._sync_token_ids_across_tp(token_ids, sampling_info)
+        return token_ids
 
     def forward(
         self,
@@ -497,6 +546,11 @@ class Sampler(nn.Module):
     def _sync_token_ids_across_tp(
         self, batch_next_token_ids: torch.Tensor, sampling_info: SamplingBatchInfo
     ):
+        # A one-rank process group has no peer to synchronize with. Besides
+        # avoiding an unnecessary collective, this is required on devices such
+        # as MPS where torch.distributed cannot all-reduce device tensors.
+        if self.tp_sync_world_size <= 1:
+            return
         if SYNC_TOKEN_IDS_ACROSS_TP or sampling_info.grammars:
             # For performance reasons, SGLang does not sync the final token IDs across TP ranks by default.
             # This saves one all-reduce, but the correctness of this approach depends on the determinism of several operators:

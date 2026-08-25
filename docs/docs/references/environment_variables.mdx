@@ -1889,10 +1889,13 @@ SGLang supports various environment variables that can be used to configure its 
   </tbody>
 </table>
 
-## Apple Silicon (MLX / MPS)
+## Apple Silicon (MPS)
 
-These variables configure the SRT MLX backend. SGLang Diffusion uses PyTorch
-MPS and does not read them.
+Apple Silicon uses one Torch MPS backend; there is no environment switch for a
+second MLX backend. Custom MLX and Metal implementations are opt-in priorities
+for individual semantic operations. Each comma-separated priority is read once
+at worker startup and must end in `torch`, the explicit correctness fallback.
+SGLang Diffusion uses PyTorch MPS directly and does not read these SRT controls.
 
 <table style={{width: "100%", borderCollapse: "collapse", tableLayout: "fixed"}}>
   <colgroup>
@@ -1909,24 +1912,44 @@ MPS and does not read them.
   </thead>
   <tbody>
     <tr>
-      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_USE_MLX</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Use the MLX backend on Apple Silicon.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>false</code></td>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_QWEN3_MODEL_FORWARD</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for the experimental Qwen3-0.6B whole-transformer forward. The MLX provider is not correctness-qualified for serving; keep the default <code>torch</code> provider outside developer diagnostics. Supported providers are <code>mlx</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
     </tr>
     <tr>
-      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MLX_USE_CUSTOM_ROPE</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Use the custom RoPE kernel on MLX.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>false</code></td>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_QWEN3_GREEDY_TAIL</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for the experimental Qwen3 tied LM-head and greedy argmax tail. This does not qualify the whole-model MLX path for serving. Supported providers are <code>mlx</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
     </tr>
     <tr>
-      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MLX_FUSE_SWIGLU</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Fuse the SwiGLU activation on MLX.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>false</code></td>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_QWEN3_QKNORM_ROPE_STORE</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for Qwen3 Q/K normalization, RoPE, and KV storage. Supported providers are <code>metal_aot</code>, <code>metal_jit</code>, and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
     </tr>
     <tr>
-      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MLX_CLEAR_CACHE_STEPS</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Number of decode steps between <code>mx.clear_cache()</code> calls. <code>0</code> disables cache clearing.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>256</code></td>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_QWEN3_RADIX_DECODE</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for Qwen3 Radix decode attention. Supported providers are <code>metal_aot</code>, <code>metal_jit</code>, and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
+    </tr>
+    <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_QWEN3_DEFERRED_KV_COMMIT</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for committing deferred Qwen3 K/V results into the Torch-owned KV pool. Supported providers are <code>metal_jit</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
+    </tr>
+    <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_RMSNORM</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for RMSNorm. Supported providers are <code>metal_jit</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
+    </tr>
+    <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_FUSED_ADD_RMSNORM</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for fused residual add and RMSNorm. Supported providers are <code>metal_jit</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
+    </tr>
+    <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_MPS_SILU_AND_MUL</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Provider priority for fused SiLU and multiply. Supported providers are <code>metal_jit</code> and <code>torch</code>.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>torch</code></td>
     </tr>
   </tbody>
 </table>

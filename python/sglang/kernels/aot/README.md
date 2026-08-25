@@ -32,6 +32,12 @@ Requires
 make build
 ```
 
+### Apple Metal
+
+The Apple Silicon package requires Torch 2.13 and is a Torch-loadable metallib
+rather than a native extension. See [METAL.md](METAL.md) for its layout and
+build contract.
+
 ### Limit build resource usage (CPU / parallelism)
 
 By default, `make build` uses all available CPU cores. You can override build parallelism and NVCC compile threads:

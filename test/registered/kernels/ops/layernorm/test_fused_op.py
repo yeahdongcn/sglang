@@ -69,6 +69,49 @@ def test_priority_dispatch():
     assert _ToyAdd()(_t(1.0), _t(2.0)).item() == 1003.0
 
 
+def test_instance_priority_override_rebuilds_dispatch_order():
+    op = _ToyAdd()
+    assert op.get_priority() == (KernelBackend.TRITON, KernelBackend.TORCH)
+
+    # String backend names are accepted for configuration/env adapters. The
+    # override is local to this instance and changes the cached hot-path order.
+    op.set_priority("torch, triton")
+    assert op.get_priority() == (KernelBackend.TORCH, KernelBackend.TRITON)
+    assert op(_t(1.0), _t(2.0)).item() == 3.0
+    assert _ToyAdd()(_t(1.0), _t(2.0)).item() == 1003.0
+
+
+def test_instance_priority_rejects_unimplemented_backend_without_mutation():
+    op = _ToyAdd()
+    original = op.get_priority()
+    with pytest.raises(ValueError, match="not implemented/registered"):
+        op.set_priority([KernelBackend.AOT])
+    assert op.get_priority() == original
+
+
+def test_instance_priority_preserves_explicit_and_global_overrides():
+    op = _ToyAdd()
+    op.set_priority([KernelBackend.TORCH])
+
+    # An explicit call is still authoritative over automatic priority.
+    assert op.forward(_t(1.0), _t(2.0), backend=KernelBackend.TRITON).item() == 1003.0
+
+    # The process-wide force remains authoritative over the per-instance order.
+    K.set_fused_op_backend(KernelBackend.TRITON)
+    assert op(_t(1.0), _t(2.0)).item() == 1003.0
+
+
+def test_instance_priority_can_restore_class_default_and_accept_empty_gate():
+    op = _ToyAdd()
+    op.set_priority([])
+    assert op.get_priority() == ()
+    assert op(_t(1.0), _t(2.0)).item() == 3.0  # native fallback remains intact
+
+    op.set_priority(None)
+    assert op.get_priority() == op.priority
+    assert op(_t(1.0), _t(2.0)).item() == 1003.0
+
+
 def test_explicit_backend_overrides_priority():
     assert (
         _ToyAdd().forward(_t(1.0), _t(2.0), backend=KernelBackend.TORCH).item() == 3.0
@@ -124,6 +167,7 @@ def test_fused_op_registers_all_backends():
         KernelBackend.JIT,
         KernelBackend.AOT,
         KernelBackend.AITER,
+        KernelBackend.METAL_JIT,
         KernelBackend.TORCH_NPU,
     }
 

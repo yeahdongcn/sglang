@@ -243,6 +243,82 @@ def test_custom_sampling_path_can_enable_sampling_observer():
     assert runner.sampling_observer is observer
 
 
+@pytest.mark.parametrize("observer_active", [False, True])
+def test_model_runner_prepares_invocation_scoped_observer_state(observer_active):
+    observer = SimpleNamespace(is_active=Mock(return_value=observer_active))
+    runner = _model_runner_for_sampling_path()
+    runner.sampling_observer = observer
+    sampling_info = object()
+    forward_batch = SimpleNamespace(
+        sampling_info=sampling_info,
+        sampling_observer_active=None,
+    )
+
+    ModelRunner._prepare_sampling_observer_state(runner, forward_batch)
+
+    assert forward_batch.sampling_observer_active is observer_active
+    observer.is_active.assert_called_once_with(sampling_info)
+
+
+def test_model_runner_prepares_inactive_state_without_an_observer_call():
+    runner = _model_runner_for_sampling_path()
+    forward_batch = SimpleNamespace(
+        sampling_info=object(),
+        sampling_observer_active=None,
+    )
+
+    ModelRunner._prepare_sampling_observer_state(runner, forward_batch)
+
+    assert forward_batch.sampling_observer_active is False
+
+
+@pytest.mark.parametrize("observer_active", [False, True])
+def test_standard_sampling_reuses_prepared_observer_state(observer_active):
+    observer_state = object()
+    observer = SimpleNamespace(
+        is_active=Mock(return_value=observer_active),
+        after_sample=Mock(return_value=None),
+    )
+    runner = _model_runner_for_sampling_path()
+    runner.sampling_observer = observer
+    runner._preprocess_logits = Mock(
+        return_value=observer_state if observer_active else None
+    )
+    sampled_tokens = torch.tensor([3])
+    runner.sampler = Mock(return_value=sampled_tokens)
+    runner.ngram_embedding_manager = SimpleNamespace(
+        update_after_decode=lambda **kwargs: None
+    )
+    logits_output = LogitsProcessorOutput(next_token_logits=torch.zeros(1, 4))
+    forward_batch = SimpleNamespace(
+        sampling_info=object(),
+        sampling_observer_active=None,
+        return_logprob=False,
+        top_logprobs_nums=None,
+        token_ids_logprobs=None,
+        positions=torch.tensor([0]),
+        seq_lens=torch.tensor([1]),
+        forward_mode=SimpleNamespace(is_decode=lambda: True),
+    )
+
+    ModelRunner._prepare_sampling_observer_state(runner, forward_batch)
+    ModelRunner.sample(runner, logits_output, forward_batch)
+
+    observer.is_active.assert_called_once_with(forward_batch.sampling_info)
+    if observer_active:
+        runner._preprocess_logits.assert_called_once_with(
+            logits_output,
+            forward_batch.sampling_info,
+            observer=observer,
+        )
+        observer.after_sample.assert_called_once_with(observer_state, sampled_tokens)
+    else:
+        runner._preprocess_logits.assert_called_once_with(
+            logits_output, forward_batch.sampling_info
+        )
+        observer.after_sample.assert_not_called()
+
+
 @pytest.mark.parametrize("has_inactive_observer", [False, True])
 def test_sampling_without_active_observer_preserves_preprocess_override(
     has_inactive_observer,

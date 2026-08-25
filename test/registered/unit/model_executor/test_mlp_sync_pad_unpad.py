@@ -35,7 +35,17 @@ def _mock_model_runner(seq_len_fill_value: int = 1) -> MagicMock:
 
 def _logits_output(num_rows: int) -> SimpleNamespace:
     return SimpleNamespace(
-        next_token_logits=torch.randn(num_rows, 16), hidden_states=None
+        next_token_logits=torch.randn(num_rows, 16),
+        hidden_states=None,
+        precomputed_greedy_token_ids=None,
+    )
+
+
+def _precomputed_output(num_rows: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        next_token_logits=None,
+        hidden_states=None,
+        precomputed_greedy_token_ids=torch.arange(num_rows),
     )
 
 
@@ -201,6 +211,74 @@ class TestMlpSyncPadUnpad(CustomTestCase):
         self.assertEqual(fb.extend_seq_lens_cpu, [4])
         self.assertEqual(fb.extend_prefix_lens_cpu, [0])
         self.assertEqual(fb.extend_logprob_start_lens_cpu, [0])
+
+    def test_decode_post_forward_unpads_precomputed_tokens(self):
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.DECODE,
+            batch_size=3,
+            input_ids=torch.tensor([11, 12, 13]),
+            req_pool_indices=torch.tensor([5, 6, 7]),
+            seq_lens=torch.tensor([7, 8, 9]),
+            out_cache_loc=torch.tensor([0, 1, 2]),
+            seq_lens_sum=24,
+            positions=torch.tensor([6, 7, 8]),
+            seq_lens_cpu=torch.tensor([7, 8, 9]),
+            lora_ids=[None, None, None],
+        )
+        fb._original_batch_size = fb.batch_size
+        fb.batch_size = 5
+        fb._pad_inputs_to_size(_mock_model_runner(), num_tokens=5, bs=5)
+
+        output = _precomputed_output(5)
+        fb.post_forward_mlp_sync_batch(output)
+
+        self.assertIsNone(output.next_token_logits)
+        torch.testing.assert_close(
+            output.precomputed_greedy_token_ids, torch.tensor([0, 1, 2])
+        )
+
+    def test_extend_post_forward_treats_precomputed_tokens_as_per_request(self):
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=2,
+            input_ids=torch.arange(7),
+            req_pool_indices=torch.tensor([1, 2]),
+            seq_lens=torch.tensor([3, 4]),
+            out_cache_loc=torch.arange(7),
+            seq_lens_sum=7,
+            positions=torch.tensor([0, 1, 2, 0, 1, 2, 3]),
+            seq_lens_cpu=torch.tensor([3, 4]),
+            lora_ids=[None, None],
+        )
+        fb._original_batch_size = fb.batch_size
+        fb._pad_inputs_to_size(_mock_model_runner(), num_tokens=10, bs=2)
+
+        output = _precomputed_output(2)
+        fb.post_forward_mlp_sync_batch(output)
+
+        self.assertIsNone(output.next_token_logits)
+        torch.testing.assert_close(
+            output.precomputed_greedy_token_ids, torch.tensor([0, 1])
+        )
+
+    def test_extend_post_forward_rejects_token_row_layout(self):
+        fb = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=2,
+            input_ids=torch.arange(7),
+            req_pool_indices=torch.tensor([1, 2]),
+            seq_lens=torch.tensor([3, 4]),
+            out_cache_loc=torch.arange(7),
+            seq_lens_sum=7,
+            positions=torch.tensor([0, 1, 2, 0, 1, 2, 3]),
+            seq_lens_cpu=torch.tensor([3, 4]),
+            lora_ids=[None, None],
+        )
+        fb._original_batch_size = fb.batch_size
+        fb._pad_inputs_to_size(_mock_model_runner(), num_tokens=10, bs=2)
+
+        with self.assertRaisesRegex(RuntimeError, "one row per padded request"):
+            fb.post_forward_mlp_sync_batch(_precomputed_output(10))
 
 
 if __name__ == "__main__":

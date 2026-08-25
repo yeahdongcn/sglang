@@ -136,6 +136,11 @@ class RadixAttention(nn.Module):
         self.idx_k_scale_float = None
         self.idx_v_scale_float = None
         self.quant_method = None
+        # Optional platform/model-specific decode implementation.  It is a
+        # plain provider object selected during model initialization; the
+        # AttentionBackend remains responsible for Radix metadata and KV-pool
+        # ownership.
+        self.decode_provider = None
 
         if quant_config is not None:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)

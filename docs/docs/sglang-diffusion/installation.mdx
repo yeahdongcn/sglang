@@ -127,5 +127,6 @@ cp python/pyproject_other.toml python/pyproject.toml
 uv pip install -e "python[all_mps]"
 ```
 
-SGLang Diffusion uses PyTorch MPS. The `all_mps` extra also installs the SRT
-MLX backend dependencies; `SGLANG_USE_MLX` applies only to SRT serving.
+SGLang Diffusion uses PyTorch MPS. The `all_mps` extra also installs the tested
+Torch and MLX dependencies required by the SRT MPS backend, but Diffusion does
+not use the SRT MLX operators.

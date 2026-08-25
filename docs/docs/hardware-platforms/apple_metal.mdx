@@ -1,24 +1,33 @@
 ---
 title: "Apple Silicon with Metal"
 metatags:
-    description: "Run SGLang on Apple Silicon using the Metal backend."
+    description: "Run SGLang on Apple Silicon with the PyTorch MPS backend and optional Metal and MLX operators."
 ---
 
 This document describes how to run the SGLang serving runtime on Apple Silicon
-using [MLX](https://opensource.apple.com/projects/mlx/). SGLang Diffusion uses
-PyTorch MPS instead; see its [installation guide](/docs/sglang-diffusion/installation#platform-specific-apple-mps).
+with the PyTorch MPS backend. The standard SGLang scheduler owns request
+lifecycle and `RadixCache`; the Torch `ModelRunner` owns model loading,
+parameters, request tables, and KV pools, while the standard logits and
+sampling paths remain authoritative. Model implementations can opt in to custom Metal kernels and
+[MLX](https://opensource.apple.com/projects/mlx/) operator islands for supported
+workloads; there is no separate MLX backend or MLX model loader. SGLang
+Diffusion uses PyTorch MPS without these MLX operators; see its
+[installation guide](/docs/sglang-diffusion/installation#platform-specific-apple-mps).
 If you encounter issues or have questions, please [open an issue](https://github.com/sgl-project/sglang/issues).
 
 ## Prerequisites
 
-The MLX runtime requires Apple Silicon with macOS 14 or newer, stable PyTorch
-2.13.x, and stable MLX 0.32.0 or newer. The `srt_mps` extra installs PyTorch
-2.13.0 and MLX 0.32.0 or newer; startup accepts stable PyTorch 2.13 patch
-releases and newer stable MLX releases.
+The SRT MPS backend requires Apple Silicon with macOS 14 or newer, stable
+PyTorch 2.13.x, and stable MLX 0.32.0 or newer. The `srt_mps` extra installs
+PyTorch 2.13.0 and MLX 0.32.0 or newer; startup accepts stable PyTorch 2.13
+patch releases and newer stable MLX releases.
 
-With `SGLANG_USE_MLX=1`, SGLang validates both framework versions and Metal
-availability during argument initialization and stops before resolving or
-downloading a model when the runtime is incompatible.
+SGLang validates both framework versions, PyTorch MPS and MLX Metal
+availability, and supported server arguments during argument initialization.
+It stops before resolving or downloading a model when the runtime or server
+configuration is incompatible. Model-specific operator eligibility is handled
+independently: unsupported models and dynamic request shapes remain on their
+ordinary Torch implementation.
 
 Building the optional native Metal kernels in `sgl-kernel` requires the Metal
 shader compiler from the full Xcode application. The standalone Xcode Command
@@ -59,77 +68,131 @@ uv pip install -e "python[all_mps]"
 Launch the server with:
 
 ```bash
-SGLANG_USE_MLX=1 python -m sglang.launch_server \
-  --model <MODEL_ID_OR_PATH> \
-  --disable-cuda-graph \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-0.6B \
+  --dtype bfloat16 \
+  --device mps \
   --host 0.0.0.0
 ```
 
 **Key Parameters Explained:**
 
-1. `SGLANG_USE_MLX=1` - Enables the use of MLX as the SGLang runtime backend (if disabled, SGLang will fall back to `torch.mps`, which has less support)
-2. `--disable-cuda-graph` - Disables usage of CUDA graph, which is not relevant for Apple Metal.
-3. `--disable-overlap-schedule` - Disables overlap scheduling (enabled/not present by default) achieved using MLX's `async_eval()`
-4. `SGLANG_MLX_USE_CUSTOM_ROPE=1` - Enables the optional custom Metal RoPE kernel. It is disabled by default, so the MLX backend uses the standard RoPE path unless you opt in for A/B testing.
-5. `SGLANG_MLX_FUSE_SWIGLU=1` - Enables the use of fused Swish-Gated Linear Unit kernel (disabled by default)
-6. `SGLANG_MLX_CLEAR_CACHE_STEPS=256` - Sets the number of decode steps before clearing the MLX cache (256 by default)
+1. `--dtype bfloat16` - Enables the currently optimized Qwen3-0.6B operator contract.
+2. `--device mps` - Selects the PyTorch MPS device explicitly. Apple Silicon can also be auto-detected.
+
+This is one backend and one model instance. Prefix caching remains enabled by
+default, and the ordinary SGLang scheduler and cache lifecycle stay in use. The
+launch command above uses the all-Torch path because every operator priority
+defaults to `torch`. For Qwen3-0.6B, explicitly configured priorities can
+select implementations in this order:
+
+1. An experimental whole-transformer MLX island for eligible decode and
+   cold-prefill calls.
+2. Torch-stream Metal kernels for QKV normalization, RoPE, KV storage, and
+   radix decode attention when the whole-model island is not eligible.
+3. The ordinary Torch model path for unsupported models, features, or dynamic
+   request shapes.
+
+For developer-only benchmarking, the experimental whole-model MLX profile is
+enabled with:
+
+```bash
+SGLANG_MPS_QWEN3_MODEL_FORWARD=mlx,torch \
+SGLANG_MPS_QWEN3_GREEDY_TAIL=mlx,torch \
+SGLANG_MPS_QWEN3_DEFERRED_KV_COMMIT=metal_jit,torch \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-0.6B \
+  --dtype bfloat16 \
+  --device mps \
+  --host 0.0.0.0
+```
+
+This whole-model profile is not currently correctness-qualified for serving: a
+full-vocabulary greedy parity stress test diverges from both the Torch path and
+the `mlx-lm` model core. Keep the default Torch model-forward and greedy-tail
+providers for serving until that mismatch is resolved.
+
+Each setting is an immutable provider-priority list read at worker startup and
+must end in the explicit correctness fallback `torch`. See the
+[environment-variable reference](/docs/references/environment_variables#apple-silicon-mps)
+for the independent whole-model, attention, KV, normalization, and activation
+controls. Keep the default Torch providers unless the selected combination has
+been validated for the model and workload being served.
+
+MPS disables overlap scheduling and CUDA graph capture through its normal
+backend defaults. MLX `mx.compile` executables belong to the selected model
+operator; they are not CUDA graphs or a second graph runner. MPS currently
+supports the `mps` or `torch_native` attention backend, PyTorch sampling,
+auto/bfloat16 KV cache, unquantized weights, NHD KV layout, and
+tensor/pipeline/data parallel sizes of one. Unsupported combinations fail
+during argument validation instead of reaching model loading.
+
+### Optional MLX operator scope
+
+The opt-in, experimental MLX path currently supports the dense, unquantized
+`Qwen3ForCausalLM` configuration used by `Qwen/Qwen3-0.6B`
+(`hidden_size=1024` and `intermediate_size=3072`) with contiguous bfloat16
+Torch weights. It requires the standard SGLang model implementation,
+tensor/pipeline/data parallel sizes of one, and a single non-disaggregated
+serving process.
+
+The model plan uses MLX at two bounded execution points:
+
+- A complete, prefix-free, single-request prefill with 512 through 1024 tokens
+  runs as one whole-model MLX island, including attention and MLP computation.
+- Eligible decode batches can run as one whole-model MLX island. Batch size
+  one uses a shape-specialized `mx.compile` executable owned and warmed by the
+  model operator; other supported decode batches use the eager whole-model MLX
+  graph.
+
+Prefix-hit and otherwise unsupported prefills stay on the standard model path.
+The whole-model islands write deferred K/V results into the Torch-owned KV
+pool, so scheduler, allocation, radix-cache, and request lifecycle ownership do
+not move to MLX. DLPack borrows unified storage without a data copy, while the
+broad island amortizes the required cross-framework synchronization. Feature
+modes that depend on ordinary module hooks or different storage lifecycles,
+including tensor dumping, LoRA, hidden-state capture, and CPU offload, stay on
+the ordinary Torch/Metal path. Once an MLX implementation has passed
+eligibility and is selected, bridge, compilation, warmup, or storage lifecycle
+failures are surfaced instead of silently changing implementations.
 
 ## Quantization
 
-The MLX backend supports two quantization paths on Apple Silicon:
-
-1. **Pre-quantized HF repos.** Any `mlx-community/<model>-4bit` (or `-8bit`) repo loads directly through `mlx_lm.load(...)` — no extra flag needed.
-   ```bash
-   SGLANG_USE_MLX=1 python -m sglang.launch_server \
-     --model-path mlx-community/Qwen3-0.6B-4bit \
-     --disable-cuda-graph
-   ```
-2. **On-the-fly quantization.** For any fp16 model, pass `--quantization mlx_q4` or `--quantization mlx_q8` to have sglang quantize the weights at load time via `mlx_lm.utils.quantize_model` (group size 64, the mlx-community default). The quantized weights stay in process memory; the on-disk model is untouched.
-   ```bash
-   SGLANG_USE_MLX=1 python -m sglang.launch_server \
-     --model-path Qwen/Qwen3-0.6B \
-     --quantization mlx_q4 \
-     --disable-cuda-graph
-   ```
-   Expected log line:
-   ```
-   Quantizing MLX model on-the-fly: bits=4 group_size=64 (preset=mlx_q4)
-   Quantization complete in 0.13s — active mem: 1.11 GB -> 0.31 GB (71.9% reduction)
-   ```
-   The MLX backend silently ignores `--quantization mlx_q4` when the model is already quantized in its HF config (path 1), so the same flag is safe to pass either way.
+The MPS backend currently requires unquantized Torch weights. Omit
+`--quantization` or pass the explicit `--quantization unquant` spelling. It
+does not use `mlx-lm`, load `mlx-community` pre-quantized checkpoints, or
+provide load-time MLX quantization modes.
 
 ## Benchmarking with Requests
 
-`sglang.benchmark.one_batch` calls the synchronous prefill/decode methods directly without going through the scheduler and the overlap code path.
+`sglang.benchmark.one_batch` calls the standard Torch `ModelRunner` directly,
+so it does not exercise the scheduler or `RadixCache`. The same configured
+model-operator plan is installed as in serving.
 
-`sglang.benchmark.offline_throughput` can toggle overlap scheduling as it uses the scheduler and the overlap code path by using the flag `--disable-overlap-schedule`.
+`sglang.benchmark.offline_throughput` exercises the scheduler and standard
+prefix-cache path. Overlap scheduling is disabled automatically on MPS.
 
 ### Throughput Testing
 
 Basic synchronous one batch throughput:
 ```bash
-SGLANG_USE_MLX=1 python -m sglang.benchmark.one_batch \
-  --model-path <MODEL_ID_OR_PATH> \
-  --disable-cuda-graph \
+python -m sglang.benchmark.one_batch \
+  --model-path Qwen/Qwen3-0.6B \
+  --dtype bfloat16 \
+  --device mps \
+  --attention-backend mps \
   --tp-size 1 \
   --batch-size 1 \
-  --input-len 60 \
+  --input-len 512 \
   --output-len 10
 ```
 
-Synchronous offline throughput:
+Scheduler-based offline throughput:
 ```bash
-SGLANG_USE_MLX=1 python -m sglang.benchmark.offline_throughput \
-  --model-path <MODEL_ID_OR_PATH> \
-  --disable-cuda-graph \
-  --num-prompts 1 \
-  --disable-overlap-schedule
-```
-
-Asynchronous offline throughput:
-```bash
-SGLANG_USE_MLX=1 python -m sglang.benchmark.offline_throughput \
-  --model-path <MODEL_ID_OR_PATH> \
-  --disable-cuda-graph \
-  --num-prompts 1
+python -m sglang.benchmark.offline_throughput \
+  --model-path Qwen/Qwen3-0.6B \
+  --dtype bfloat16 \
+  --device mps \
+  --attention-backend mps \
+  --num-prompts 8
 ```

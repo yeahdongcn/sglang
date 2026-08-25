@@ -1,9 +1,5 @@
 """Unit tests for the radix-cache registry, routing, and selection chain."""
 
-from sglang.test.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=5, suite="base-a-test-cpu")
-
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +12,10 @@ from sglang.srt.mem_cache.registry import (
     register_radix_cache_backend,
     registered_radix_cache_backends,
 )
+from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
+
+register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 
 def _publish(testcase, **fields):

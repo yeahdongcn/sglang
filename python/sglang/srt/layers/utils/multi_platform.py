@@ -58,5 +58,8 @@ class MultiPlatformOp(BaseFusedOp):
     def forward_hpu(self, *args, **kwargs):
         return self.forward_native(*args, **kwargs)
 
+    def forward_mps(self, *args, **kwargs):
+        return self.forward_native(*args, **kwargs)
+
     def forward_cpu(self, *args, **kwargs):
         return self.forward_native(*args, **kwargs)
