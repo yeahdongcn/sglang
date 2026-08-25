@@ -312,6 +312,7 @@ def mlx_call_multi(
     operation: Callable[..., tuple[mx.array, ...]],
     *tensors: torch.Tensor | MlxTensorView,
     device: torch.device | Literal["mps", "cpu"] | None = None,
+    after_mps_fence: Callable[[], None] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run one MLX operation and export all of its outputs as Torch tensors.
 
@@ -329,7 +330,16 @@ def mlx_call_multi(
     additional materialization evaluation; contiguous MPS model outputs take
     the single-evaluation, zero-copy path.
 
+    ``after_mps_fence`` is a narrow ownership-retirement hook. When this call
+    has a Torch MPS producer, the hook runs exactly once after the existing
+    producer fence succeeds and before any current input is imported or the
+    MLX graph is built. It is not called for CPU-only inputs. The hook must be
+    synchronous and host-only; it must not enqueue framework work or add
+    another synchronization boundary.
     """
+    if after_mps_fence is not None and not callable(after_mps_fence):
+        raise TypeError("after_mps_fence must be callable or None")
+
     mx = _mlx_core()
     target_device = _get_torch_device() if device is None else torch.device(device)
     if target_device.type not in {"cpu", "mps"}:
@@ -345,6 +355,8 @@ def mlx_call_multi(
     )
     if needs_mps_fence:
         torch.mps.synchronize()
+        if after_mps_fence is not None:
+            after_mps_fence()
 
     borrowed: tuple[Any, ...] = tuple(
         (

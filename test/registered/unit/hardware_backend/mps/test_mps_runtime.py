@@ -12,6 +12,16 @@ from sglang.test.ci.ci_register import register_mps_ci
 register_mps_ci(est_time=1, suite="stage-a-unit-test-mps")
 
 
+def _fake_mlx(version: str | None, *, metal_available: bool = True):
+    fake_mlx = types.ModuleType("mlx")
+    fake_core = types.ModuleType("mlx.core")
+    if version is not None:
+        fake_core.__version__ = version
+    fake_core.metal = types.SimpleNamespace(is_available=lambda: metal_available)
+    fake_mlx.core = fake_core
+    return fake_mlx, fake_core
+
+
 class TestMpsRuntime(unittest.TestCase):
     def tearDown(self):
         runtime.validate_mps_runtime.cache_clear()
@@ -23,8 +33,23 @@ class TestMpsRuntime(unittest.TestCase):
         self.assertFalse(runtime._is_stable_series("2.13.0rc1", (2, 13)))
         self.assertFalse(runtime._is_stable_series("unknown", (2, 13)))
 
-    def test_runtime_does_not_require_mlx_or_metal_kernel_apis(self):
+    def test_mlx_version_gate_accepts_newer_stable_releases(self):
+        self.assertTrue(runtime._is_stable_at_least("0.32.0", runtime._MIN_MLX_VERSION))
+        self.assertTrue(runtime._is_stable_at_least("0.33.0", runtime._MIN_MLX_VERSION))
+        self.assertFalse(
+            runtime._is_stable_at_least("0.31.9", runtime._MIN_MLX_VERSION)
+        )
+        self.assertFalse(
+            runtime._is_stable_at_least("0.33.0rc1", runtime._MIN_MLX_VERSION)
+        )
+        self.assertFalse(
+            runtime._is_stable_at_least("unknown", runtime._MIN_MLX_VERSION)
+        )
+
+    def test_runtime_requires_mlx_but_not_optional_metal_kernel_apis(self):
+        fake_mlx, fake_core = _fake_mlx("0.33.0")
         with (
+            mock.patch.dict("sys.modules", {"mlx": fake_mlx, "mlx.core": fake_core}),
             mock.patch.object(torch, "__version__", "2.13.4"),
             mock.patch.object(torch.backends.mps, "is_available", return_value=True),
             mock.patch.object(
@@ -35,19 +60,61 @@ class TestMpsRuntime(unittest.TestCase):
             ),
             mock.patch.object(torch.mps, "compile_shader", None, create=True),
             mock.patch.object(torch.mps, "load_metallib", None, create=True),
-            mock.patch.dict("sys.modules", {"mlx": None, "mlx.core": None}),
         ):
             self.assertIsNone(runtime.validate_mps_runtime())
 
-    def test_runtime_rejects_unsupported_torch_and_missing_memory_apis(self):
+    def test_runtime_rejects_unvalidated_version_pairs(self):
+        cases = (
+            ("2.12.1", "0.32.0"),
+            ("2.14.0", "0.32.0"),
+            ("2.13.0rc1", "0.32.0"),
+            ("2.13.0", "0.31.9"),
+            ("2.13.0", "0.33.0rc1"),
+            ("2.13.0", None),
+        )
+        for torch_version, mlx_version in cases:
+            with self.subTest(torch=torch_version, mlx=mlx_version):
+                fake_mlx, fake_core = _fake_mlx(mlx_version)
+                runtime.validate_mps_runtime.cache_clear()
+                with (
+                    mock.patch.dict(
+                        "sys.modules", {"mlx": fake_mlx, "mlx.core": fake_core}
+                    ),
+                    mock.patch.object(torch, "__version__", torch_version),
+                    self.assertRaisesRegex(
+                        RuntimeError, "Torch 2.13.x and stable MLX >= 0.32.0"
+                    ),
+                ):
+                    runtime.validate_mps_runtime()
+
+    def test_runtime_rejects_missing_mlx(self):
         with (
-            mock.patch.object(torch, "__version__", "2.12.1"),
-            self.assertRaisesRegex(RuntimeError, "stable Torch 2.13.x"),
+            mock.patch.dict("sys.modules", {"mlx": None, "mlx.core": None}),
+            self.assertRaisesRegex(RuntimeError, "MLX is not installed"),
         ):
             runtime.validate_mps_runtime()
 
+    def test_runtime_rejects_unavailable_mlx_metal(self):
+        fake_mlx, fake_core = _fake_mlx("0.32.0", metal_available=False)
+        with (
+            mock.patch.dict("sys.modules", {"mlx": fake_mlx, "mlx.core": fake_core}),
+            mock.patch.object(torch, "__version__", "2.13.0"),
+            mock.patch.object(torch.backends.mps, "is_available", return_value=True),
+            mock.patch.object(
+                torch.mps, "recommended_max_memory", return_value=8 << 30, create=True
+            ),
+            mock.patch.object(
+                torch.mps, "driver_allocated_memory", return_value=0, create=True
+            ),
+            self.assertRaisesRegex(RuntimeError, "MLX Metal device"),
+        ):
+            runtime.validate_mps_runtime()
+
+    def test_runtime_rejects_missing_memory_apis(self):
+        fake_mlx, fake_core = _fake_mlx("0.32.0")
         runtime.validate_mps_runtime.cache_clear()
         with (
+            mock.patch.dict("sys.modules", {"mlx": fake_mlx, "mlx.core": fake_core}),
             mock.patch.object(torch, "__version__", "2.13.0"),
             mock.patch.object(torch.backends.mps, "is_available", return_value=True),
             mock.patch.object(torch.mps, "recommended_max_memory", None, create=True),
