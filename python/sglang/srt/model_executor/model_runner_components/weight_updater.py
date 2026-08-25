@@ -32,6 +32,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_weight_update_device(device: str):
+    """Resolve the destination used for serialized weight tensors.
+
+    CUDA-like modules expose ``current_device``; CPU and MPS intentionally do
+    not. Returning a concrete ``torch.device`` for the latter keeps tensor
+    updates backend-neutral without changing CUDA/MUSA/XPU behavior.
+    """
+    device_module = torch.get_device_module(device)
+    current_device = getattr(device_module, "current_device", None)
+    return current_device() if callable(current_device) else torch.device(device)
+
+
+def _unsupported_distributed_weight_update_error(device: str) -> Optional[str]:
+    """Return an actionable error for collectives that cannot carry MPS tensors."""
+    if str(device).split(":", 1)[0].lower() != "mps":
+        return None
+    return (
+        "Distributed online weight updates are not supported on MPS: "
+        "PyTorch 2.13 torch.distributed collectives cannot broadcast MPS tensors. "
+        "Use update_weights_from_disk or update_weights_from_tensor instead."
+    )
+
+
 def _unsupported_derived_weight_cache_error() -> Optional[str]:
     """Reject online weight updates that derived-weight caches cannot survive.
 
@@ -83,6 +106,10 @@ class WeightUpdater:
         weights/parameters online, and broadcasts them to the inference
         engine through the `_model_update_group` process group.
         """
+        error = _unsupported_distributed_weight_update_error(self.device)
+        if error is not None:
+            return False, error
+
         assert (
             torch.distributed.is_initialized()
         ), "Default torch process group must be initialized"
@@ -237,6 +264,9 @@ class WeightUpdater:
             shape: the shape of the parameter to be updated.
         """
         self._assert_weight_cache_inactive("update_weights_from_distributed")
+        error = _unsupported_distributed_weight_update_error(self.device)
+        if error is not None:
+            return False, error
         error = _unsupported_derived_weight_cache_error()
         if error is not None:
             return False, error
@@ -306,7 +336,7 @@ class WeightUpdater:
             )
             reconstructed_tensors = bucket.reconstruct_tensors()
             self.get_model().load_weights(reconstructed_tensors)
-            return True, f"Succeeded to update parameter online."
+            return True, "Succeeded to update parameter online."
         except Exception as e:
             error_msg = (
                 f"Failed to update parameter online: {e}. "
@@ -334,11 +364,12 @@ class WeightUpdater:
             )
 
         # We need to get device after patch otherwise the device would be wrong
-        device_module = torch.get_device_module(self.device)
-        infered_device = device_module.current_device()
+        # CUDA-like backends expose a process-local integer device index. MPS
+        # (and CPU) do not, so resolve them to an explicit torch.device.
+        inferred_device = _get_weight_update_device(self.device)
 
         named_tensors = [
-            (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank, device=infered_device))
+            (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank, device=inferred_device))
             for name, tensor in named_tensors
         ]
         if load_format == "direct":
@@ -390,6 +421,13 @@ class WeightUpdater:
         error = _unsupported_derived_weight_cache_error()
         if error is not None:
             return False, error
+        device_type = str(self.device).split(":", 1)[0].lower()
+        if device_type != "cuda":
+            return (
+                False,
+                "IPC weight updates through checkpoint-engine require a "
+                f"CUDA-compatible device; got device={self.device!r}",
+            )
 
         try:
             from sglang.srt.checkpoint_engine.checkpoint_engine_worker import (
