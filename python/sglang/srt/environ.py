@@ -1085,10 +1085,14 @@ class Envs:
     SGLANG_MPS_RMSNORM = EnvTuple(("torch",))
     SGLANG_MPS_FUSED_ADD_RMSNORM = EnvTuple(("torch",))
     SGLANG_MPS_SILU_AND_MUL = EnvTuple(("torch",))
-    # Qwen3-0.6B MPS attention providers, ordered best -> correctness fallback.
-    # Each operation is gated independently and defaults to the Torch path.
+    # Qwen3-0.6B MPS providers, ordered best -> correctness fallback. Each
+    # operation is gated independently and defaults to the Torch path. The
+    # whole-model gate borrows Torch-owned weights and KV storage for eligible
+    # decode forwards; it does not install a second model runner.
+    SGLANG_MPS_QWEN3_MODEL_FORWARD = EnvTuple(("torch",))
     SGLANG_MPS_QWEN3_QKNORM_ROPE_STORE = EnvTuple(("torch",))
     SGLANG_MPS_QWEN3_RADIX_DECODE = EnvTuple(("torch",))
+    SGLANG_MPS_QWEN3_DEFERRED_KV_COMMIT = EnvTuple(("torch",))
     USE_TRITON_W8A8_FP8_KERNEL = EnvBool(False)
     SGLANG_MOE_PADDING = EnvBool(False)
 

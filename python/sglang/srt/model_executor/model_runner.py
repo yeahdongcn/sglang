@@ -296,8 +296,7 @@ class ModelRunner:
     def sampling_observer(self, observer: Optional[SamplingObserver]) -> None:
         if observer is not None and not self.supports_sampling_observer():
             raise ValueError(
-                "sampling observers are not supported by the configured "
-                "sampling path"
+                "sampling observers are not supported by the configured sampling path"
             )
         self._sampling_observer = observer
 
@@ -378,6 +377,7 @@ class ModelRunner:
         self.enable_hisparse = get_memory().enable_hisparse
         self._sampling_observer: Optional[SamplingObserver] = None
         self.platform_operator_plan = None
+        self._platform_forward_lock = None
 
         self.init_startup_observability()
 
@@ -987,8 +987,16 @@ class ModelRunner:
     def _bind_platform_runtime_operators(self) -> None:
         """Replace this runner's platform operator plan."""
         self._close_platform_runtime_operators()
+        plan = self._build_platform_runtime_operator_plan(self.model)
+        self.platform_operator_plan = plan
+        self._platform_forward_lock = getattr(plan, "forward_lock", None)
+
+    def _build_platform_runtime_operator_plan(
+        self, model: torch.nn.Module
+    ) -> object | None:
+        """Build a plan without publishing it on the ModelRunner."""
         plan = current_platform.bind_model_runtime_operators(
-            model=self.model,
+            model=model,
             model_config=self.model_config,
             server_args=self.server_args,
             req_to_token_pool=self.req_to_token_pool,
@@ -999,11 +1007,12 @@ class ModelRunner:
                 "platform runtime operator plan must implement close(); "
                 f"found {type(plan).__name__}"
             )
-        self.platform_operator_plan = plan
+        return plan
 
     def _close_platform_runtime_operators(self) -> None:
         plan = getattr(self, "platform_operator_plan", None)
         self.platform_operator_plan = None
+        self._platform_forward_lock = None
         close = getattr(plan, "close", None)
         if callable(close):
             close()
@@ -1554,6 +1563,22 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         forward_count: int = 1,
     ) -> LogitsProcessorOutput:
+        lock = getattr(self, "_platform_forward_lock", None)
+        if lock is None:
+            return self._forward_split_prefill_unlocked(
+                forward_batch, reinit_attn_backend, forward_count
+            )
+        with lock:
+            return self._forward_split_prefill_unlocked(
+                forward_batch, reinit_attn_backend, forward_count
+            )
+
+    def _forward_split_prefill_unlocked(
+        self,
+        forward_batch: ForwardBatch,
+        reinit_attn_backend: bool = False,
+        forward_count: int = 1,
+    ) -> LogitsProcessorOutput:
         if forward_batch.split_index == 0 or reinit_attn_backend:
             self.attn_backend.init_forward_metadata(forward_batch)
         next_split_index = min(
@@ -1715,6 +1740,30 @@ class ModelRunner:
         forward_batch.mamba_cow_dst_indices = None
 
     def _forward_raw(
+        self,
+        forward_batch: ForwardBatch,
+        pp_proxy_tensors: Optional[PPProxyTensors],
+        reinit_attn_backend: bool = False,
+        split_forward_count: int = 1,
+    ) -> ModelRunnerOutput:
+        """Run one model forward under its platform operator lock, if any."""
+        lock = getattr(self, "_platform_forward_lock", None)
+        if lock is None:
+            return self._forward_raw_unlocked(
+                forward_batch,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
+        with lock:
+            return self._forward_raw_unlocked(
+                forward_batch,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
+
+    def _forward_raw_unlocked(
         self,
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors],
@@ -2194,13 +2243,96 @@ class ModelRunner:
         load_format: str,
         load_config: LoadConfig,
     ) -> None:
-        self.model = new_model
-        # The record says what model this PROCESS serves; a draft's weight
-        # update is not that (its own state is on the runner).
-        if not self.is_draft_worker:
-            get_context().override(
-                "model_runner.update_model_fields",
-                model_path=model_path,
-                load_format=load_format,
-            )
-        self.load_config = load_config
+        """Publish a replacement Torch model and its platform operator plan."""
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            model_replaced = new_model is not self.model
+            old_plan = getattr(self, "platform_operator_plan", None)
+            runtime_context = get_context()
+            if not self.is_draft_worker:
+                resolved_args = runtime_context.resolved_server_args_dict()
+                old_model_path = resolved_args.get("model_path")
+                old_load_format = resolved_args.get("load_format")
+
+            if not model_replaced:
+                if not self.is_draft_worker:
+                    runtime_context.override(
+                        "model_runner.update_model_fields",
+                        model_path=model_path,
+                        load_format=load_format,
+                    )
+                self.model = new_model
+                self.load_config = load_config
+                return
+
+            if not self.is_draft_worker:
+                runtime_context.override(
+                    "model_runner.update_model_fields",
+                    model_path=model_path,
+                    load_format=load_format,
+                )
+            close_old_plan = getattr(old_plan, "close", None)
+            try:
+                if callable(close_old_plan):
+                    close_old_plan()
+                self.platform_operator_plan = None
+                new_plan = self._build_platform_runtime_operator_plan(new_model)
+                new_lock = getattr(new_plan, "forward_lock", None)
+                if lock is not None and new_lock is not lock:
+                    close_new_plan = getattr(new_plan, "close", None)
+                    if callable(close_new_plan):
+                        close_new_plan()
+                    raise RuntimeError(
+                        "a replacement platform operator plan changed the "
+                        "runner's serving lock identity"
+                    )
+            except Exception:
+                if not self.is_draft_worker:
+                    try:
+                        runtime_context.override(
+                            "model_runner.update_model_fields.rollback",
+                            model_path=old_model_path,
+                            load_format=old_load_format,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to roll back server arguments after a model "
+                            "replacement failed"
+                        )
+                # The old model stays published on the safe Torch path because
+                # closing its plan removed only provider-owned hooks.
+                raise
+
+            self.model = new_model
+            self.load_config = load_config
+            self.platform_operator_plan = new_plan
+            self._platform_forward_lock = new_lock
+
+    def invalidate_platform_operator_views(self) -> None:
+        """Drop borrowed custom-op views after a Torch weight mutation."""
+        plan = getattr(self, "platform_operator_plan", None)
+        invalidate = getattr(plan, "invalidate_views", None)
+        if not callable(invalidate):
+            return
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            invalidate()
+
+    def close_platform_operators(self) -> None:
+        """Release platform custom-op state before model/cache teardown."""
+        plan = getattr(self, "platform_operator_plan", None)
+        close = getattr(plan, "close", None)
+        if not callable(close):
+            return
+        lock = getattr(self, "_platform_forward_lock", None)
+        lock_ctx = lock if lock is not None else contextlib.nullcontext()
+        with lock_ctx:
+            close()
+
+    def get_platform_operator_state(self) -> Optional[dict]:
+        """Return the selected platform operator implementations and counters."""
+        plan = getattr(self, "platform_operator_plan", None)
+        get_state = getattr(plan, "get_state", None)
+        return get_state() if callable(get_state) else None

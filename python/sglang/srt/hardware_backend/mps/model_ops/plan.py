@@ -1,18 +1,21 @@
-"""Qwen3-0.6B Metal attention plan for the standard Torch ModelRunner.
+"""Qwen3-0.6B operator plan for the standard Torch ModelRunner.
 
 The plan owns only provider selection and bindings. Torch continues to own the
-model parameters, KV pools, request tables, and Radix cache. Both semantic
-operators default to Torch and can be enabled independently at startup.
+model parameters, KV pools, request tables, and Radix cache. Attention kernels
+and a bounded whole-model MLX decode island default to Torch and can be enabled
+independently at startup.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
 
+from sglang.kernels.fused_op import get_fused_op_backend
 from sglang.kernels.spec import KernelBackend
 from sglang.srt.hardware_backend.mps.model_ops.qwen3 import (
     QWEN3_06B_METAL_SPEC,
@@ -25,23 +28,35 @@ from sglang.srt.hardware_backend.mps.model_ops.qwen3 import (
 from sglang.srt.hardware_backend.mps.model_ops.selection import (
     Qwen3MetalAttentionSelection,
     choose_kernel_backend,
+    choose_model_backend,
 )
 
 logger = logging.getLogger(__name__)
 
 QWEN3_MPS_MODEL = "Qwen3ForCausalLM"
+MPS_OPERATOR_FORWARD_LOCK = threading.RLock()
 
 
 @dataclass
 class Qwen3MetalAttentionPlan:
-    """Lifecycle and diagnostics for one runner's Qwen3 attention providers."""
+    """Lifecycle and diagnostics for one runner's Qwen3 providers."""
 
     model: str = QWEN3_MPS_MODEL
     qkv_kernel_backend: str = "torch"
     decode_kernel_backend: str = "torch"
+    deferred_kv_commit_backend: str = "off"
     qkv_fallback_reason: Optional[str] = None
     decode_fallback_reason: Optional[str] = None
-    provider_priorities: dict[str, list[str]] = field(default_factory=dict)
+    whole_model_backend: str = "torch"
+    whole_model_fallback_reason: Optional[str] = None
+    provider_priorities: dict[str, Any] = field(default_factory=dict)
+    forward_lock: Any = field(
+        default_factory=lambda: MPS_OPERATOR_FORWARD_LOCK,
+        repr=False,
+        compare=False,
+    )
+    _model: Optional[torch.nn.Module] = field(default=None, repr=False, compare=False)
+    _model_forward_provider: Any = field(default=None, repr=False, compare=False)
     _bindings: tuple[tuple[Any, Qwen3MpsAttentionProvider], ...] = field(
         default=(), repr=False, compare=False
     )
@@ -49,22 +64,48 @@ class Qwen3MetalAttentionPlan:
 
     @property
     def enabled(self) -> bool:
-        return bool(self._bindings) and not self._closed
+        return bool(self._bindings or self._model_forward_provider) and not self._closed
+
+    def invalidate_views(self) -> None:
+        """Drop borrowed MLX views after an in-place Torch weight mutation."""
+        if self._closed or self._model_forward_provider is None:
+            return
+        with self.forward_lock:
+            self._model_forward_provider.invalidate_views()
 
     def close(self) -> None:
         """Remove only bindings still owned by this plan."""
-        if self._closed:
-            return
-        for module, provider in self._bindings:
-            if getattr(module, "op_provider", None) is provider:
-                module.op_provider = None
-            attention = getattr(module, "attn", None)
-            if getattr(attention, "decode_provider", None) is provider:
-                attention.decode_provider = None
-        self._bindings = ()
-        self._closed = True
+        with self.forward_lock:
+            if self._closed:
+                return
+            provider = self._model_forward_provider
+            qwen3_model = getattr(self._model, "model", None)
+            if provider is not None:
+                if getattr(qwen3_model, "model_forward_provider", None) is provider:
+                    qwen3_model.model_forward_provider = None
+                provider.close()
+            for module, attention_provider in self._bindings:
+                if getattr(module, "op_provider", None) is attention_provider:
+                    module.op_provider = None
+                attention = getattr(module, "attn", None)
+                if getattr(attention, "decode_provider", None) is attention_provider:
+                    attention.decode_provider = None
+            self._model_forward_provider = None
+            self._bindings = ()
+            self._closed = True
 
     def get_state(self) -> dict[str, Any]:
+        model_provider = self._model_forward_provider
+        compiled = (
+            model_provider.get_compiled_decode_state()
+            if model_provider is not None
+            else {
+                "enabled": False,
+                "warmup_count": 0,
+                "call_count": 0,
+                "fallback_count": 0,
+            }
+        )
         providers = [provider for _, provider in self._bindings]
         return {
             "enabled": self.enabled,
@@ -72,8 +113,31 @@ class Qwen3MetalAttentionPlan:
             "provider_priorities": self.provider_priorities,
             "qkv_kernel_backend": self.qkv_kernel_backend,
             "decode_kernel_backend": self.decode_kernel_backend,
+            "deferred_kv_commit_backend": self.deferred_kv_commit_backend,
             "qkv_fallback_reason": self.qkv_fallback_reason,
             "decode_fallback_reason": self.decode_fallback_reason,
+            "whole_model_backend": self.whole_model_backend,
+            "whole_model_fallback_reason": self.whole_model_fallback_reason,
+            "whole_model_call_count": int(getattr(model_provider, "call_count", 0)),
+            "whole_model_decode_call_count": int(
+                getattr(model_provider, "decode_call_count", 0)
+            ),
+            "whole_model_max_decode_batch_size": int(
+                getattr(model_provider, "max_decode_batch_size", 0)
+            ),
+            "whole_model_selector_call_count": int(
+                getattr(model_provider, "selector_call_count", 0)
+            ),
+            "whole_model_selector_fallback_count": int(
+                getattr(model_provider, "selector_fallback_count", 0)
+            ),
+            "whole_model_last_fallback_reason": getattr(
+                model_provider, "last_selector_fallback_reason", None
+            ),
+            "whole_model_compile_enabled": bool(compiled["enabled"]),
+            "whole_model_compile_warmup_count": int(compiled["warmup_count"]),
+            "whole_model_compile_call_count": int(compiled["call_count"]),
+            "whole_model_compile_fallback_count": int(compiled["fallback_count"]),
             "patched_qkv_modules": sum(
                 provider.qkv_kernel_backend is not None for provider in providers
             ),
@@ -142,6 +206,57 @@ def _validate_full_attention_config(model_config: Any) -> None:
                     "Qwen3 Metal attention requires full attention; "
                     f"unsupported {field_name}={value!r}"
                 )
+
+
+def _whole_model_mlx_fallback_reason(
+    model_config: Any,
+    server_args: Any,
+    forced_backend: Optional[KernelBackend],
+) -> Optional[str]:
+    """Return a normal static selector miss for the coarse decode island."""
+    if forced_backend is not None:
+        return (
+            f"explicit fused-op backend {forced_backend.value!r} disables "
+            "whole-model MLX selection"
+        )
+
+    # A whole-transformer island bypasses decoder Module.__call__ hooks.
+    from sglang.srt.debug_utils.dumper import dumper
+
+    if dumper.may_enable:
+        return "Dumper observability requires the ordinary Torch module path"
+    try:
+        _validate_full_attention_config(model_config)
+    except RuntimeError as exc:
+        return str(exc)
+    model_dtype = getattr(model_config, "dtype", None)
+    if model_dtype is not None and model_dtype != torch.bfloat16:
+        return f"model dtype {model_dtype} is not bfloat16"
+    quantization = getattr(model_config, "quantization", None)
+    if quantization not in (None, "unquant"):
+        return f"quantization {quantization!r} is not supported"
+    if not bool(getattr(server_args, "disable_overlap_schedule", True)):
+        return "overlap scheduling has no cross-framework queue ownership contract"
+    for field_name in (
+        "enable_deterministic_inference",
+        "enable_torch_compile",
+        "enable_memory_saver",
+        "enable_lora",
+        "forward_hooks",
+        "enable_layerwise_nvtx_marker",
+        "debug_tensor_dump_output_folder",
+        "msprobe_dump_config",
+        "torchao_config",
+    ):
+        if getattr(server_args, field_name, None):
+            return f"{field_name} requires the ordinary Torch module path"
+    if getattr(server_args, "lora_paths", None):
+        return "LoRA requires the ordinary Torch module path"
+    if float(getattr(server_args, "cpu_offload_gb", 0) or 0) > 0:
+        return "CPU-offloaded weights cannot be borrowed by MLX"
+    if str(getattr(server_args, "weight_cache_mode", "off")) != "off":
+        return "weight-cache storage can invalidate MLX borrows"
+    return None
 
 
 def _qwen3_modules(model: torch.nn.Module) -> list[Any]:
@@ -222,20 +337,34 @@ def _fallback_plan(
     model: str = QWEN3_MPS_MODEL,
     selection: Qwen3MetalAttentionSelection | None = None,
 ) -> Qwen3MetalAttentionPlan:
-    logger.info("Qwen3 Metal attention uses Torch: %s", reason)
+    logger.info("Qwen3 MPS operators use Torch: %s", reason)
     return Qwen3MetalAttentionPlan(
         model=model,
         qkv_fallback_reason=reason,
         decode_fallback_reason=reason,
+        whole_model_fallback_reason=reason,
         provider_priorities=selection.as_state() if selection else {},
     )
 
 
 def _publish_bindings(
-    attentions: list[Any], providers: list[Qwen3MpsAttentionProvider]
+    model: torch.nn.Module,
+    model_forward_provider: Any,
+    attentions: list[Any],
+    providers: list[Qwen3MpsAttentionProvider],
 ) -> None:
     published: list[tuple[Any, str, Any]] = []
     try:
+        if model_forward_provider is not None:
+            qwen3_model = model.model
+            published.append(
+                (
+                    qwen3_model,
+                    "model_forward_provider",
+                    qwen3_model.model_forward_provider,
+                )
+            )
+            qwen3_model.model_forward_provider = model_forward_provider
         for module, provider in zip(attentions, providers):
             if provider.qkv_kernel_backend is not None:
                 published.append((module, "op_provider", module.op_provider))
@@ -259,17 +388,18 @@ def install_qwen3_metal_attention(
     model_config: Any,
     server_args: Any,
     *,
+    req_to_token_pool: Any = None,
     token_to_kv_pool: Any = None,
-    **_: Any,
 ) -> Qwen3MetalAttentionPlan:
     """Validate, warm, and atomically bind the selected Qwen3 providers."""
     if not model_is_qwen3_06b(model_config):
         return _fallback_plan(
-            "model is outside the dense Qwen3-0.6B Metal attention contract",
+            "model is outside the dense Qwen3-0.6B MPS operator contract",
             model=type(model).__name__,
         )
 
     selection = Qwen3MetalAttentionSelection.from_env()
+    forced_backend = get_fused_op_backend()
     from sglang.kernels.metal import is_metal_jit_available
     from sglang.kernels.ops.attention.qwen3_mps import (
         is_qwen3_metal_aot_available,
@@ -318,90 +448,168 @@ def install_qwen3_metal_attention(
             "Qwen3 Metal Radix decode provider"
         )
 
-    if selected_qkv is KernelBackend.TORCH and selected_decode is KernelBackend.TORCH:
-        return Qwen3MetalAttentionPlan(
-            qkv_fallback_reason=qkv_reason,
-            decode_fallback_reason=decode_reason,
-            provider_priorities=selection.as_state(),
-        )
-
-    try:
-        _validate_full_attention_config(model_config)
-        attentions = _qwen3_modules(model)
-        expected_layers = _model_num_hidden_layers(model_config)
-        if not attentions:
-            raise RuntimeError("no Qwen3Attention modules were found")
-        if expected_layers is not None and len(attentions) != expected_layers:
-            raise RuntimeError(
-                f"expected {expected_layers} Qwen3Attention modules, "
-                f"found {len(attentions)}"
-            )
-    except RuntimeError as exc:
-        return _fallback_plan(str(exc), selection=selection)
-
-    if selected_qkv is not KernelBackend.TORCH:
+    attentions: list[Any] = []
+    providers: list[Qwen3MpsAttentionProvider] = []
+    qkv_custom = selected_qkv is not KernelBackend.TORCH
+    decode_custom = selected_decode is not KernelBackend.TORCH
+    if qkv_custom or decode_custom:
         try:
-            for module in attentions:
-                validate_qwen3_qkv_module(module)
+            _validate_full_attention_config(model_config)
+            attentions = _qwen3_modules(model)
+            expected_layers = _model_num_hidden_layers(model_config)
+            if not attentions:
+                raise RuntimeError("no Qwen3Attention modules were found")
+            if expected_layers is not None and len(attentions) != expected_layers:
+                raise RuntimeError(
+                    f"expected {expected_layers} Qwen3Attention modules, "
+                    f"found {len(attentions)}"
+                )
         except RuntimeError as exc:
+            if qkv_custom:
+                qkv_reason = str(exc)
+            if decode_custom:
+                decode_reason = str(exc)
             selected_qkv = KernelBackend.TORCH
-            qkv_reason = str(exc)
-    if selected_decode is not KernelBackend.TORCH:
-        try:
-            for module in attentions:
-                validate_qwen3_decode_module(module)
-        except RuntimeError as exc:
             selected_decode = KernelBackend.TORCH
-            decode_reason = str(exc)
+            qkv_custom = decode_custom = False
+            attentions = []
+        else:
+            if qkv_custom:
+                try:
+                    for module in attentions:
+                        validate_qwen3_qkv_module(module)
+                except RuntimeError as exc:
+                    selected_qkv = KernelBackend.TORCH
+                    qkv_reason = str(exc)
+                    qkv_custom = False
+            if decode_custom:
+                try:
+                    for module in attentions:
+                        validate_qwen3_decode_module(module)
+                except RuntimeError as exc:
+                    selected_decode = KernelBackend.TORCH
+                    decode_reason = str(exc)
+                    decode_custom = False
 
-    if selected_qkv is KernelBackend.TORCH and selected_decode is KernelBackend.TORCH:
-        return Qwen3MetalAttentionPlan(
-            qkv_fallback_reason=qkv_reason,
-            decode_fallback_reason=decode_reason,
-            provider_priorities=selection.as_state(),
-        )
+            if qkv_custom or decode_custom:
+                try:
+                    contracts = _validate_kv_pool_contract(token_to_kv_pool, attentions)
+                except RuntimeError as exc:
+                    if qkv_custom:
+                        qkv_reason = str(exc)
+                    if decode_custom:
+                        decode_reason = str(exc)
+                    selected_qkv = KernelBackend.TORCH
+                    selected_decode = KernelBackend.TORCH
+                    qkv_custom = decode_custom = False
+                    attentions = []
+                else:
+                    # Selected compile/load failures are startup errors, never a
+                    # silent provider change after the gate has been resolved.
+                    warmup_qwen3_mps_provider(
+                        selected_qkv if qkv_custom else KernelBackend.TORCH,
+                        selected_decode if decode_custom else KernelBackend.TORCH,
+                    )
+                    providers = [
+                        Qwen3MpsAttentionProvider(
+                            pool_contract=contract,
+                            qkv_kernel_backend=(selected_qkv if qkv_custom else None),
+                            decode_kernel_backend=(
+                                selected_decode if decode_custom else None
+                            ),
+                        )
+                        for contract in contracts
+                    ]
+            else:
+                attentions = []
 
-    try:
-        contracts = _validate_kv_pool_contract(token_to_kv_pool, attentions)
-    except RuntimeError as exc:
-        if selected_qkv is not KernelBackend.TORCH:
-            qkv_reason = str(exc)
-        if selected_decode is not KernelBackend.TORCH:
-            decode_reason = str(exc)
-        return Qwen3MetalAttentionPlan(
-            qkv_fallback_reason=qkv_reason,
-            decode_fallback_reason=decode_reason,
-            provider_priorities=selection.as_state(),
+    model_forward_provider = None
+    whole_model_backend = "torch"
+    whole_model_reason: Optional[str] = None
+    deferred_backend = KernelBackend.TORCH
+    if forced_backend is not None:
+        whole_model_reason = (
+            f"explicit fused-op backend {forced_backend.value!r} disables "
+            "whole-model MLX selection"
         )
+    else:
+        mlx_requested = "mlx" in selection.model_forward
+        mlx_available = False
+        if mlx_requested:
+            try:
+                import mlx.core  # noqa: F401
 
-    # Compilation/load failures after selection are startup errors. Do not
-    # silently change a benchmarked provider to Torch.
-    warmup_qwen3_mps_provider(selected_qkv, selected_decode)
-    providers = [
-        Qwen3MpsAttentionProvider(
-            pool_contract=contract,
-            qkv_kernel_backend=(
-                selected_qkv if selected_qkv is not KernelBackend.TORCH else None
-            ),
-            decode_kernel_backend=(
-                selected_decode if selected_decode is not KernelBackend.TORCH else None
-            ),
+                mlx_available = True
+            except ImportError:
+                pass
+        selected_model_backend = choose_model_backend(
+            selection.model_forward,
+            mlx_available=mlx_available,
         )
-        for contract in contracts
-    ]
-    _publish_bindings(attentions, providers)
+        if selected_model_backend == "mlx":
+            whole_model_reason = _whole_model_mlx_fallback_reason(
+                model_config,
+                server_args,
+                forced_backend,
+            )
+            if whole_model_reason is None:
+                from sglang.srt.hardware_backend.mps.model_ops.qwen3_mlx import (
+                    create_qwen3_mlx_model_provider,
+                    validate_qwen3_mlx_static_contract,
+                )
+
+                try:
+                    validate_qwen3_mlx_static_contract(
+                        model,
+                        token_to_kv_pool,
+                        req_to_token_pool,
+                    )
+                except RuntimeError as exc:
+                    whole_model_reason = str(exc)
+                else:
+                    deferred_backend = choose_kernel_backend(
+                        selection.deferred_kv_commit,
+                        aot_available=False,
+                        jit_available=jit_available,
+                    )
+                    model_forward_provider = create_qwen3_mlx_model_provider(
+                        model,
+                        token_to_kv_pool,
+                        req_to_token_pool,
+                        kv_commit_backend=deferred_backend,
+                    )
+                    whole_model_backend = "mlx"
+        elif mlx_requested and not mlx_available:
+            whole_model_reason = "the MLX runtime is unavailable"
+        else:
+            whole_model_reason = "disabled by SGLANG_MPS_QWEN3_MODEL_FORWARD priority"
 
     plan = Qwen3MetalAttentionPlan(
         qkv_kernel_backend=selected_qkv.value,
         decode_kernel_backend=selected_decode.value,
+        deferred_kv_commit_backend=(
+            deferred_backend.value if model_forward_provider is not None else "off"
+        ),
         qkv_fallback_reason=qkv_reason,
         decode_fallback_reason=decode_reason,
+        whole_model_backend=whole_model_backend,
+        whole_model_fallback_reason=whole_model_reason,
         provider_priorities=selection.as_state(),
+        _model=model,
+        _model_forward_provider=model_forward_provider,
         _bindings=tuple(zip(attentions, providers)),
     )
+    try:
+        _publish_bindings(model, model_forward_provider, attentions, providers)
+    except Exception:
+        plan.close()
+        raise
+
     logger.info(
-        "Installed Qwen3 Metal attention plan: qkv=%s decode=%s layers=%d; "
+        "Installed Qwen3 MPS operator plan: whole_model=%s qkv=%s decode=%s "
+        "layers=%d; "
         "Torch owns weights, KV pools, and Radix cache",
+        whole_model_backend,
         selected_qkv.value,
         selected_decode.value,
         len(providers),
