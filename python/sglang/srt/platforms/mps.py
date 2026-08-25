@@ -133,6 +133,11 @@ class MpsSRTPlatform(MpsDeviceMixin, SRTPlatform):
         from sglang.srt.hardware_backend.mps.runtime import validate_mps_runtime
 
         validate_mps_runtime()
+        from sglang.srt.hardware_backend.mps.generic_kernels import (
+            configure_mps_generic_kernels,
+        )
+
+        configure_mps_generic_kernels()
 
     def get_default_attention_backend(self) -> str:
         return "torch_native"

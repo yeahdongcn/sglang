@@ -1079,6 +1079,12 @@ class Envs:
     # auto-select by priority. "torch" flips all fused ops to their pure-torch
     # reference implementations for numerical-bug bisection.
     SGLANG_FORCE_FUSED_OP_BACKEND = EnvStr(None)
+    # Apple MPS generic semantic operators. Each ordered list must end in
+    # ``torch``; ``metal_jit,torch`` opts one operator into its narrow Metal
+    # contract while preserving a shape/dtype correctness fallback.
+    SGLANG_MPS_RMSNORM = EnvTuple(("torch",))
+    SGLANG_MPS_FUSED_ADD_RMSNORM = EnvTuple(("torch",))
+    SGLANG_MPS_SILU_AND_MUL = EnvTuple(("torch",))
     USE_TRITON_W8A8_FP8_KERNEL = EnvBool(False)
     SGLANG_MOE_PADDING = EnvBool(False)
 
