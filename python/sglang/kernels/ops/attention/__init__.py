@@ -43,7 +43,19 @@ for _mod, _fn in _TRITON_KERNELS:
     )
 del _mod, _fn
 
-__all__ = []
+from sglang.kernels.ops.attention.qwen3_mps import (  # noqa: E402,F401
+    Qwen3QKNormRopeStoreOp,
+    Qwen3RadixDecodeOp,
+    qwen3_qknorm_rope_store,
+    qwen3_radix_decode,
+)
+
+__all__ = [
+    "Qwen3QKNormRopeStoreOp",
+    "Qwen3RadixDecodeOp",
+    "qwen3_qknorm_rope_store",
+    "qwen3_radix_decode",
+]
 
 
 # Vendored linear-attention (flash-linear-attention port) kernels relocated
