@@ -1,6 +1,7 @@
 """CPU-safe lifecycle tests for the Qwen3 Metal attention plan."""
 
 from contextlib import ExitStack, contextmanager
+from importlib.util import find_spec
 from types import SimpleNamespace
 from unittest import mock
 
@@ -134,6 +135,72 @@ def test_default_torch_gates_do_not_discover_or_warm_providers():
     assert not plan.enabled
     assert plan.qkv_kernel_backend == "torch"
     assert plan.decode_kernel_backend == "torch"
+
+
+@pytest.mark.skipif(
+    find_spec("mlx") is None, reason="requires the optional MLX runtime"
+)
+def test_whole_model_mlx_provider_is_published_after_static_validation():
+    selection = Qwen3MetalAttentionSelection(
+        qknorm_rope_store=(KernelBackend.TORCH,),
+        radix_decode=(KernelBackend.TORCH,),
+        model_forward=("mlx", "torch"),
+        deferred_kv_commit=(KernelBackend.TORCH,),
+    )
+    model = SimpleNamespace(
+        model=SimpleNamespace(model_forward_provider=None),
+    )
+    provider = mock.Mock(
+        call_count=0,
+        decode_call_count=0,
+        max_decode_batch_size=0,
+        selector_call_count=0,
+        selector_fallback_count=0,
+        last_selector_fallback_reason=None,
+        get_compiled_decode_state=lambda: {
+            "enabled": True,
+            "warmup_count": 1,
+            "call_count": 0,
+            "fallback_count": 0,
+        },
+    )
+
+    with (
+        _install_patches(selection),
+        mock.patch(
+            "sglang.srt.hardware_backend.mps.model_ops.plan.get_fused_op_backend",
+            return_value=None,
+        ),
+        mock.patch(
+            "sglang.srt.hardware_backend.mps.model_ops.plan._whole_model_mlx_fallback_reason",
+            return_value=None,
+        ),
+        mock.patch(
+            "sglang.srt.hardware_backend.mps.model_ops.qwen3_mlx.validate_qwen3_mlx_static_contract"
+        ) as validate,
+        mock.patch(
+            "sglang.srt.hardware_backend.mps.model_ops.qwen3_mlx.create_qwen3_mlx_model_provider",
+            return_value=provider,
+        ) as create,
+    ):
+        plan = install_qwen3_metal_attention(
+            model,
+            _model_config(layers=28),
+            _server_args(disable_overlap_schedule=True),
+            req_to_token_pool=object(),
+            token_to_kv_pool=object(),
+        )
+
+    validate.assert_called_once()
+    create.assert_called_once()
+    assert model.model.model_forward_provider is provider
+    assert plan.whole_model_backend == "mlx"
+    assert plan.deferred_kv_commit_backend == "torch"
+    assert plan.get_state()["whole_model_compile_enabled"]
+
+    plan.close()
+    provider.close.assert_called_once_with()
+    assert model.model.model_forward_provider is None
 
 
 def test_qkv_and_decode_select_independent_providers_atomically():

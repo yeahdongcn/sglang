@@ -14,6 +14,7 @@ from sglang.kernels.spec import KernelBackend
 from sglang.srt.hardware_backend.mps.model_ops.selection import (
     Qwen3MetalAttentionSelection,
     choose_kernel_backend,
+    choose_model_backend,
 )
 from sglang.test.ci.ci_register import register_cpu_ci, register_mps_ci
 
@@ -39,6 +40,8 @@ def test_defaults_keep_both_semantic_ops_on_torch(monkeypatch):
 
     assert selection.qknorm_rope_store == (KernelBackend.TORCH,)
     assert selection.radix_decode == (KernelBackend.TORCH,)
+    assert selection.model_forward == ("torch",)
+    assert selection.deferred_kv_commit == (KernelBackend.TORCH,)
 
 
 def test_aot_is_not_advertised_without_a_torch_data_only_artifact():
@@ -89,6 +92,31 @@ def test_invalid_priorities_fail_at_startup(field, value, error):
         _selection(**{field: value})
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        (
+            "SGLANG_MPS_QWEN3_MODEL_FORWARD",
+            "mlx",
+            "must end with 'torch'",
+        ),
+        (
+            "SGLANG_MPS_QWEN3_MODEL_FORWARD",
+            "cuda,torch",
+            "unsupported provider",
+        ),
+        (
+            "SGLANG_MPS_QWEN3_DEFERRED_KV_COMMIT",
+            "metal_aot,torch",
+            "unsupported provider",
+        ),
+    ],
+)
+def test_model_and_deferred_priorities_fail_closed(field, value, error):
+    with pytest.raises(RuntimeError, match=error):
+        _selection(**{field: value})
+
+
 def test_availability_falls_through_in_declared_order():
     priority = (
         KernelBackend.METAL_AOT,
@@ -111,6 +139,11 @@ def test_availability_falls_through_in_declared_order():
         )
         is KernelBackend.TORCH
     )
+
+
+def test_model_priority_falls_back_to_torch_when_mlx_is_unavailable():
+    assert choose_model_backend(("mlx", "torch"), mlx_available=False) == "torch"
+    assert choose_model_backend(("mlx", "torch"), mlx_available=True) == "mlx"
 
 
 if __name__ == "__main__":

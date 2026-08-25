@@ -455,6 +455,48 @@ class Qwen3Model(Qwen2Model):
             decoder_layer_type=Qwen3DecoderLayer,
             alt_stream=alt_stream,
         )
+        # Installed only after the standard Torch weights and KV pools exist.
+        # The provider is a plain lifecycle-bound object and owns neither.
+        self.model_forward_provider = None
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        *,
+        allow_model_forward_provider: bool = True,
+    ):
+        provider = self.model_forward_provider
+        if (
+            allow_model_forward_provider
+            and provider is not None
+            and provider.should_run(
+                forward_batch,
+                model=self,
+                input_ids=input_ids,
+                positions=positions,
+                input_embeds=input_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )
+        ):
+            return provider.forward(
+                self,
+                input_ids,
+                positions,
+                forward_batch,
+                input_embeds=input_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )
+        return super().forward(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
 
 
 class Qwen3ForCausalLM(nn.Module):
@@ -532,6 +574,9 @@ class Qwen3ForCausalLM(nn.Module):
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
+            allow_model_forward_provider=(
+                not get_embedding and not self.capture_aux_hidden_states
+            ),
         )
 
         aux_hidden_states = None
