@@ -178,7 +178,7 @@ class SamplingParams:
 
     height: int | None = None
     width: int | None = None
-    fps: int = 24
+    fps: float = 24.0
 
     # LTX-2.5 duration head. Ignored by other models, so the flags stay
     # universally accepted.
@@ -503,8 +503,13 @@ class SamplingParams:
             )
 
         # Used by seconds() and video writer; fps <= 0 is always invalid.
-        if not isinstance(self.fps, int) or self.fps <= 0:
-            raise ValueError(f"fps must be a positive int, got {self.fps!r}")
+        if (
+            isinstance(self.fps, bool)
+            or not isinstance(self.fps, (int, float))
+            or not math.isfinite(self.fps)
+            or self.fps <= 0
+        ):
+            raise ValueError(f"fps must be a positive number, got {self.fps!r}")
 
         # num_frames is already asserted in __post_init__, but keep a friendly error here too
         # (e.g., when validation is triggered from other code paths).

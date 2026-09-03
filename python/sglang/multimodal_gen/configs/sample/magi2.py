@@ -60,7 +60,7 @@ class Magi2SamplingParams(SamplingParams):
 
     # (63 - 1) * 4 + 1, from a causal decoder over 63 refiner latent frames.
     num_frames: int = 249
-    fps: int = MAGI2_REFINER_FPS
+    fps: float = MAGI2_REFINER_FPS
 
     guidance_scale: float = 5.0
     audio_guidance_scale: float = 7.0
