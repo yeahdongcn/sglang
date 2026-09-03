@@ -18,20 +18,26 @@
 
 #include <algorithm>
 #include <array>
+#if __cplusplus >= 202002L
 #include <concepts>
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
+#if __cplusplus >= 202002L
 #include <ranges>
+#endif
+#if __cplusplus >= 202002L
 #include <span>
+#endif
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__MUSA__)
 #include <sgl_kernel/utils.cuh>
 #elif defined(__HIPCC__)
 #include <sgl_kernel/utils.cuh>
@@ -53,24 +59,34 @@ struct SizeRef;
 struct DTypeRef;
 struct DeviceRef;
 
-template <typename T>
+template <typename T, typename Enable = void>
 struct DLDataTypeTrait {};
 
+#if __cplusplus >= 202002L
 template <std::integral T>
-struct DLDataTypeTrait<T> {
+struct DLDataTypeTrait<T, void> {
+#else
+template <typename T>
+struct DLDataTypeTrait<T, std::enable_if_t<std::is_integral_v<T>>> {
+#endif
   inline static constexpr DLDataType value = {
       .code = std::is_signed_v<T> ? DLDataTypeCode::kDLInt : DLDataTypeCode::kDLUInt,
       .bits = static_cast<std::uint8_t>(sizeof(T) * 8),
       .lanes = 1};
 };
 
+#if __cplusplus >= 202002L
 template <std::floating_point T>
-struct DLDataTypeTrait<T> {
+struct DLDataTypeTrait<T, void> {
+#else
+template <typename T>
+struct DLDataTypeTrait<T, std::enable_if_t<std::is_floating_point_v<T>>> {
+#endif
   inline static constexpr DLDataType value = {
       .code = DLDataTypeCode::kDLFloat, .bits = static_cast<std::uint8_t>(sizeof(T) * 8), .lanes = 1};
 };
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__MUSA__)
 template <>
 struct DLDataTypeTrait<fp16_t> {
   inline static constexpr DLDataType value = {.code = DLDataTypeCode::kDLFloat, .bits = 16, .lanes = 1};
@@ -112,32 +128,13 @@ struct PrintAbleSpan {
 };
 
 // define DLDataType comparison and printing in root namespace
-inline constexpr auto kDeviceStringMap = [] {
-  constexpr auto map = std::array<std::pair<DLDeviceType, const char*>, 16>{
-      std::pair{DLDeviceType::kDLCPU, "cpu"},
-      std::pair{DLDeviceType::kDLCUDA, "cuda"},
-      std::pair{DLDeviceType::kDLCUDAHost, "cuda_host"},
-      std::pair{DLDeviceType::kDLOpenCL, "opencl"},
-      std::pair{DLDeviceType::kDLVulkan, "vulkan"},
-      std::pair{DLDeviceType::kDLMetal, "metal"},
-      std::pair{DLDeviceType::kDLVPI, "vpi"},
-      std::pair{DLDeviceType::kDLROCM, "rocm"},
-      std::pair{DLDeviceType::kDLROCMHost, "rocm_host"},
-      std::pair{DLDeviceType::kDLExtDev, "ext_dev"},
-      std::pair{DLDeviceType::kDLCUDAManaged, "cuda_managed"},
-      std::pair{DLDeviceType::kDLOneAPI, "oneapi"},
-      std::pair{DLDeviceType::kDLWebGPU, "webgpu"},
-      std::pair{DLDeviceType::kDLHexagon, "hexagon"},
-      std::pair{DLDeviceType::kDLMAIA, "maia"},
-      std::pair{DLDeviceType::kDLTrn, "trn"},
-  };
-  constexpr auto max_type = stdr::max(map | stdv::keys);
-  auto result = std::array<std::string_view, max_type + 1>{};
-  for (const auto& [code, name] : map) {
-    result[static_cast<std::size_t>(code)] = name;
-  }
-  return result;
-}();
+// DLPack's device enum is dense for the values used here. A direct aggregate
+// keeps the table a device-safe constant under mcc/C++17 (the C++20 range
+// lambda used upstream is rejected as dynamic __device__ initialization).
+inline constexpr auto kDeviceStringMap = std::array<std::string_view, 16>{
+    "cpu",       "cuda",       "cuda_host", "opencl", "vulkan", "metal",
+    "vpi",       "rocm",       "rocm_host", "ext_dev", "cuda_managed",
+    "oneapi",    "webgpu",     "hexagon",   "maia",   "trn"};
 
 struct PrintableDevice {
   DLDevice device;

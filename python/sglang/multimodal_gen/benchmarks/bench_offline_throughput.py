@@ -157,7 +157,7 @@ class BenchArgs:
         parser.add_argument(
             "--num-frames", type=int, default=1, help="Number of frames for video"
         )
-        parser.add_argument("--fps", type=int, default=24, help="FPS for video")
+        parser.add_argument("--fps", type=float, default=24, help="FPS for video")
 
         # Dataset & Benchmark
         parser.add_argument(

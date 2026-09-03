@@ -1178,7 +1178,7 @@ class SamplingParams:
 
         add_argument(
             "--fps",
-            type=int,
+            type=float,
             help="Frames per second for saved output",
         )
         add_argument(

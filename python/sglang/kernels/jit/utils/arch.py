@@ -113,6 +113,14 @@ def _init_jit_cuda_arch_once():
 
 def get_default_target_flags(arch: ArchInfo | None = None) -> List[str]:
     """Default compile flags for `arch`, defaulting to the detected local GPU."""
+    if is_musa_runtime():
+        if arch is None:
+            arch = get_jit_cuda_arch()
+        # mcc accepts the CUDA-compatible optimization flags, but not nvcc's
+        # --expt-relaxed-constexpr switch.  Keep C++17 here: mcc 5.2 can crash
+        # while parsing the C++20 concepts in libstdc++ (setup_musa.py uses
+        # this same standard for its known-good AOT build).
+        return [arch.jit_flag, "-std=c++17", "-O3"]
     if is_hip_runtime():
         flags = ["-DUSE_ROCM", "-std=c++20", "-O3"]
         # Detect FP8 type based on GPU architecture

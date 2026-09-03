@@ -8,14 +8,16 @@
 #pragma once
 #include <sgl_kernel/utils.cuh>
 
+#if __cplusplus >= 202002L
 #include <concepts>
+#endif
 #include <cstddef>
 #include <limits>
 #include <type_traits>
 
 namespace sglang {
 
-template <typename T>
+template <typename T, typename Enable = void>
 struct DTypeTrait {};
 
 #define SGL_REGISTER_PACKED(SELF, PACKED) \
@@ -56,8 +58,13 @@ struct DTypeTrait {};
   }                                                                 \
   static_assert(true)
 
+#if __cplusplus >= 202002L
 template <std::integral T>
-struct DTypeTrait<T> {
+struct DTypeTrait<T, void> {
+#else
+template <typename T>
+struct DTypeTrait<T, std::enable_if_t<std::is_integral_v<T>>> {
+#endif
   SGL_REGISTER_PACKED(T, void);
   SGL_REGISTER_UNPACK(T, 1);
   SGL_REGISTER_FROM_DEFAULT();

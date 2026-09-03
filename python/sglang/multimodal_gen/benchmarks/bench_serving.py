@@ -817,7 +817,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-frames", type=int, default=None, help="Number of frames (for video)."
     )
-    parser.add_argument("--fps", type=int, default=None, help="FPS (for video).")
+    parser.add_argument("--fps", type=float, default=None, help="FPS (for video).")
     parser.add_argument(
         "--output-file", type=str, default=None, help="Output JSON file for metrics."
     )

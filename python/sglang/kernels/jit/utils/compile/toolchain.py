@@ -22,7 +22,11 @@ from typing import List, Tuple
 import torch
 
 from sglang.kernels.jit.utils.arch import get_jit_cuda_arch
-from sglang.kernels.jit.utils.common import cache_once, is_hip_runtime
+from sglang.kernels.jit.utils.common import (
+    cache_once,
+    is_hip_runtime,
+    is_musa_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,18 @@ def cuda_home() -> str:
     the two must stay in agreement, since one picks the target and the other
     compiles for it.
     """
+    # torchada exposes the MUSA toolchain through the CUDA-compatible
+    # extension API, but its compiler is mcc rather than nvcc. Resolve MUSA
+    # before the CUDA fallback so JIT does not probe /usr/local/cuda.
+    if is_musa_runtime():
+        configured = os.environ.get("MUSA_HOME") or os.environ.get("MUSA_PATH")
+        if configured is not None:
+            return configured
+        mcc_path = shutil.which("mcc")
+        if mcc_path is not None:
+            return os.path.dirname(os.path.dirname(mcc_path))
+        return "/usr/local/musa"
+
     configured = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if configured is not None:
         return configured
@@ -57,6 +73,8 @@ def device_compiler_path() -> str:
     Resolved the same way tvm-ffi resolves it, so the binary the cache
     fingerprints is the binary that does the compiling.
     """
+    if is_musa_runtime():
+        return os.path.join(cuda_home(), "bin", "mcc")
     if is_hip_runtime():
         return os.path.join(rocm_home(), "bin", "hipcc")
     return os.path.join(cuda_home(), "bin", "nvcc")
@@ -80,6 +98,17 @@ def gpu_arch_name() -> str:
     CUDA-shaped ``(major, minor)`` capability: the latter maps gfx940/gfx941/
     gfx942 onto a single ``9.4``, which are three different compile targets.
     """
+    if is_musa_runtime():
+        configured = os.environ.get("MTGPU_TARGET")
+        if configured:
+            return configured if configured.startswith("mp_") else f"mp_{configured}"
+        try:
+            device = torch.cuda.current_device()
+            major, minor = torch.cuda.get_device_capability(device)
+            return f"mp_{major}{minor}"
+        except Exception:
+            logger.warning("Cannot detect MUSA target; the JIT cache target degrades.")
+            return "mp_unknown"
     if not is_hip_runtime():
         return get_jit_cuda_arch().target_name
     try:
@@ -117,6 +146,15 @@ def target_flags() -> List[str]:
     the compiler driver to probe: the value is part of the cache key, so it has
     to be decided here and not rediscovered at build time.
     """
+    if is_musa_runtime():
+        target = gpu_arch_name()
+        return [
+            f"--cuda-gpu-arch={target}",
+            f"--offload-arch={target}",
+            "-x",
+            "musa",
+            "-mtgpu",
+        ]
     if is_hip_runtime():
         return [f"--offload-arch={gpu_arch_name()}"]
     arch = get_jit_cuda_arch()
@@ -135,6 +173,8 @@ def base_cxx_flags() -> List[str]:
 
 
 def base_cuda_flags() -> List[str]:
+    if is_musa_runtime():
+        return ["-fPIC", "-D__MUSA__", "-DUSE_MUSA"]
     if is_hip_runtime():
         return ["-fPIC", "-D__HIP_PLATFORM_AMD__=1", "-fno-gpu-rdc"]
     return ["-Xcompiler", "-fPIC"]
@@ -142,6 +182,23 @@ def base_cuda_flags() -> List[str]:
 
 def base_include_paths() -> List[str]:
     includes, _, _ = tvm_ffi_paths()
+    if is_musa_runtime():
+        # Import torchada before asking cpp_extension for paths. This returns
+        # the generated CUDA-compatible ATen headers and MUSA include root
+        # used by setup_musa.py.
+        import torchada  # noqa: F401
+        from torch.utils.cpp_extension import include_paths
+
+        cpp_includes = include_paths(cuda=True)
+        # JIT sources are still written in CUDA spelling. Put torchada's
+        # generated CUDA-compatible headers before the native MUSA headers so
+        # cuda_runtime_api.h/cuda_bf16.h resolve to the shim that defines the
+        # CUDA aliases; setup_musa.py instead ports source files in place and
+        # intentionally uses the native-header order.
+        generated = [
+            path for path in cpp_includes if "generated_cuda_compatible" in path
+        ]
+        return list(dict.fromkeys([*includes, *generated, *cpp_includes]))
     if is_hip_runtime():
         return [*includes, f"{rocm_home()}/include"]
     return list(includes)
@@ -158,6 +215,15 @@ def base_link_flags(*, with_device: bool) -> List[str]:
     flags = ["-shared", f"-L{lib_dir}", f"-l{lib_name}"]
     if not with_device:
         return flags
+    if is_musa_runtime():
+        import torchada  # noqa: F401
+        from torch.utils.cpp_extension import library_paths
+
+        dirs = library_paths(cuda=True)
+        # mcc/torchada's extension linker uses libmusart for CUDA-runtime
+        # symbols. Keep tvm-ffi's link flags and add the MUSA runtime only for
+        # device-containing modules.
+        return flags + [*(f"-L{d}" for d in dirs), "-lmusart"]
     if is_hip_runtime():
         return flags + [f"-L{rocm_home()}/lib", "-lamdhip64"]
     return flags + [f"-L{cuda_home()}/lib64", "-lcudart"]

@@ -9,6 +9,21 @@ from typing import Any, Sequence
 
 import torch
 
+# torch.utils.cpp_extension is imported lazily below.  On MUSA, torchada must
+# be activated before that import so its CUDA-to-MUSA compiler shim selects
+# ``$MUSA_HOME/bin/mcc`` and the MUSA include/link paths instead of probing for
+# a CUDA ``nvcc`` installation.  Keep CUDA/CPU environments unchanged: the
+# torchada package is only required by the MUSA build supplied by the base
+# image.
+if getattr(torch.version, "musa", None) is not None:
+    try:
+        import torchada  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "MUSA diffusion JIT compilation requires torchada to be imported "
+            "before torch.utils.cpp_extension"
+        ) from exc
+
 logger = logging.getLogger(__name__)
 
 

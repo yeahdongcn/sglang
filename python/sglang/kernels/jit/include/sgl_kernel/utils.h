@@ -38,10 +38,16 @@
 
 #include <dlpack/dlpack.h>
 
+#include <sgl_kernel/cxx17_compat.h>
+
+#if __cplusplus >= 202002L
 #include <concepts>
+#endif
 #include <cstddef>
 #include <ostream>
+#if __cplusplus >= 202002L
 #include <ranges>
+#endif
 #include <sstream>
 #include <utility>
 
@@ -138,12 +144,12 @@ namespace pointer {
 
 // we only allow void * pointer arithmetic for safety
 
-template <typename T = char, std::integral... U>
+template <typename T = char, SGLANG_INTEGRAL... U>
 inline auto offset(void* ptr, U... offset) -> void* {
   return static_cast<T*>(ptr) + (... + offset);
 }
 
-template <typename T = char, std::integral... U>
+template <typename T = char, SGLANG_INTEGRAL... U>
 inline auto offset(const void* ptr, U... offset) -> const void* {
   return static_cast<const T*>(ptr) + (... + offset);
 }
@@ -151,7 +157,7 @@ inline auto offset(const void* ptr, U... offset) -> const void* {
 }  // namespace pointer
 
 /// \brief Integer ceiling division: ceil(a / b).
-template <std::integral T, std::integral U>
+template <SGLANG_INTEGRAL T, SGLANG_INTEGRAL U>
 inline constexpr auto div_ceil(T a, U b) {
   return (a + b - 1) / b;
 }
@@ -161,19 +167,85 @@ inline auto dtype_bytes(DLDataType dtype) -> std::size_t {
   return static_cast<std::size_t>(dtype.bits / 8);
 }
 
+#if __cplusplus >= 202002L
 namespace stdr = std::ranges;
 namespace stdv = stdr::views;
+#else
+namespace stdr {
+template <typename R>
+inline auto empty(const R& range) -> bool {
+  return range.begin() == range.end();
+}
+
+template <typename R, typename T>
+inline auto find(const R& range, const T& value) -> decltype(range.begin()) {
+  return std::find(range.begin(), range.end(), value);
+}
+
+template <typename R>
+inline auto end(const R& range) -> decltype(range.end()) {
+  return range.end();
+}
+
+template <typename R, typename Predicate>
+inline auto any_of(const R& range, Predicate predicate) -> bool {
+  return std::any_of(range.begin(), range.end(), predicate);
+}
+
+template <typename InputIt, typename Size, typename OutputIt>
+inline auto copy_n(InputIt first, Size count, OutputIt result) -> OutputIt {
+  return std::copy_n(first, count, result);
+}
+}  // namespace stdr
+#endif
+
+#if __cplusplus < 202002L
+template <typename T>
+class IntegerRange {
+ private:
+  class Iterator {
+   public:
+    explicit Iterator(T value) : m_value(value) {}
+    T operator*() const { return m_value; }
+    Iterator& operator++() {
+      ++m_value;
+      return *this;
+    }
+    bool operator!=(const Iterator& other) const { return m_value != other.m_value; }
+
+   private:
+    T m_value;
+  };
+
+ public:
+  IntegerRange(T start, T end) : m_start(start), m_end(end) {}
+  Iterator begin() const { return Iterator(m_start); }
+  Iterator end() const { return Iterator(m_end); }
+
+ private:
+  T m_start;
+  T m_end;
+};
+#endif
 
 /// \brief Python-style integer range: `irange(n)` -> `[0, n)`.
-template <std::integral T>
+template <SGLANG_INTEGRAL T>
 inline auto irange(T end) {
+#if __cplusplus >= 202002L
   return stdv::iota(static_cast<T>(0), end);
+#else
+  return IntegerRange<T>(static_cast<T>(0), end);
+#endif
 }
 
 /// \brief Python-style integer range: `irange(start, end)` -> `[start, end)`.
-template <std::integral T>
+template <SGLANG_INTEGRAL T>
 inline auto irange(T start, T end) {
+#if __cplusplus >= 202002L
   return stdv::iota(start, end);
+#else
+  return IntegerRange<T>(start, end);
+#endif
 }
 
 /** \brief Error class for stream-style error logging. */

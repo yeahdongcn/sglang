@@ -21,7 +21,9 @@
 #include <dlpack/dlpack.h>
 #include <tvm/ffi/extra/c_env_api.h>
 
+#if __cplusplus >= 202002L
 #include <concepts>
+#endif
 #include <cstddef>
 #include <type_traits>
 #ifndef USE_ROCM
@@ -29,6 +31,41 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#ifdef __MUSA__
+// CUDA spelling is retained by the JIT sources; mirror the aliases used by
+// torchada's generated extension headers when mcc compiles them directly.
+#ifndef CUDA_VERSION
+#define CUDA_VERSION 12080
+#endif
+using cudaError_t = musaError_t;
+using cudaStream_t = musaStream_t;
+using cudaLaunchConfig_t = musaLaunchConfig_t;
+using cudaLaunchAttribute = musaLaunchAttribute;
+using __nv_fp8_e4m3 = __mt_fp8_e4m3;
+using __nv_fp8_e5m2 = __mt_fp8_e5m2;
+using __nv_fp8x2_e4m3 = __mt_fp8x2_e4m3;
+using __nv_fp8x2_e5m2 = __mt_fp8x2_e5m2;
+using __nv_fp8x4_e4m3 = __mt_fp8x4_e4m3;
+using __nv_fp8x4_e5m2 = __mt_fp8x4_e5m2;
+#define cudaSuccess musaSuccess
+#define cudaStreamPerThread musaStreamPerThread
+#define cudaGetErrorString musaGetErrorString
+#define cudaGetLastError musaGetLastError
+#define cudaLaunchKernel musaLaunchKernel
+#define cudaLaunchKernelEx musaLaunchKernelEx
+#define cudaLaunchAttributeProgrammaticStreamSerialization \
+  musaLaunchAttributeProgrammaticStreamSerialization
+#define cudaLaunchAttributeClusterDimension musaLaunchAttributeClusterDimension
+#define cudaMemcpyAsync musaMemcpyAsync
+#define cudaMemcpyHostToDevice musaMemcpyHostToDevice
+#define cudaMemcpyDeviceToHost musaMemcpyDeviceToHost
+#define cudaDeviceGetAttribute musaDeviceGetAttribute
+#define cudaGetDeviceProperties musaGetDeviceProperties
+#define cudaFuncSetAttribute musaFuncSetAttribute
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor musaOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaDevAttrComputeCapabilityMajor musaDevAttrComputeCapabilityMajor
+#define cudaDevAttrComputeCapabilityMinor musaDevAttrComputeCapabilityMinor
+#endif
 #else
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -173,7 +210,7 @@ SGL_DEVICE void PDLTriggerSecondary() {
 #endif
 }
 
-template <std::integral T, std::integral U>
+template <SGLANG_INTEGRAL T, SGLANG_INTEGRAL U>
 SGL_DEVICE constexpr auto div_ceil(T a, U b) {
   return (a + b - 1) / b;
 }
@@ -208,12 +245,12 @@ namespace pointer {
 
 // we only allow void * pointer arithmetic for safety
 
-template <typename T = char, std::integral... U>
+template <typename T = char, SGLANG_INTEGRAL... U>
 SGL_DEVICE auto offset(void* ptr, U... offset) -> void* {
   return static_cast<T*>(ptr) + (... + offset);
 }
 
-template <typename T = char, std::integral... U>
+template <typename T = char, SGLANG_INTEGRAL... U>
 SGL_DEVICE auto offset(const void* ptr, U... offset) -> const void* {
   return static_cast<const T*>(ptr) + (... + offset);
 }
