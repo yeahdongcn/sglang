@@ -7,10 +7,15 @@ import math
 import torch
 from torch import nn
 
-from sglang.multimodal_gen.runtime.layers.magi2_mhc_kernel import mhc_mix_output
+from sglang.multimodal_gen.runtime.layers.magi2_mhc_kernel import (
+    mhc_mix_output,
+    mhc_sinkhorn,
+)
 
 
 def sinkhorn_knopp(h: torch.Tensor, *, num_iters: int, eps: float) -> torch.Tensor:
+    if h.device.type in {"cuda", "musa", "privateuseone"}:
+        return mhc_sinkhorn(h, num_iters=num_iters, eps=eps)
     m = torch.exp(h - h.amax(dim=(-2, -1), keepdim=True))
     for _ in range(num_iters):
         m = m / (m.sum(dim=-2, keepdim=True) + eps)
