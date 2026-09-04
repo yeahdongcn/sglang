@@ -59,7 +59,7 @@ def _a2a_staging_buffer(
     if (
         torch.is_grad_enabled()
         or torch.compiler.is_compiling()
-        or device.type != "cuda"
+        or device.type not in {"cuda", "musa", "privateuseone"}
         or torch.cuda.is_current_stream_capturing()
     ):
         return torch.empty(shape, dtype=dtype, device=device)
