@@ -18,6 +18,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     packed_sequence,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
+from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
+
+logger = init_logger(__name__)
 
 
 class Magi2DenoisingStage(DenoisingStage):
@@ -120,57 +125,69 @@ class Magi2DenoisingStage(DenoisingStage):
         )
 
         for step, timestep in enumerate(batch.timesteps):
-            # Per token, not a scalar: text and ref-image rows must read zero.
-            step_t = timestep.to(device)
-            t = packed_sequence.build_timesteps(
-                layout=layout, video_t=step_t, audio_t=step_t
-            )
+            with (
+                maybe_nvtx_range(f"denoising_step_{step}", self.current_use_nvtx),
+                StageProfiler(
+                    f"denoising_step_{step}",
+                    logger=logger,
+                    metrics=batch.metrics,
+                    perf_dump_path_provided=batch.perf_dump_path is not None,
+                    record_as_step=True,
+                ),
+            ):
+                # Per token, not a scalar: text and ref-image rows must read zero.
+                step_t = timestep.to(device)
+                t = packed_sequence.build_timesteps(
+                    layout=layout, video_t=step_t, audio_t=step_t
+                )
 
-            cond_video, cond_audio = self._predict(
-                video=video,
-                audio=audio,
-                text=prompt,
-                layout=layout,
-                coords=coords,
-                timestep=t,
-                ref_patches=ref_patches,
-                ref_special=ref_special,
-            )
-
-            if negative is not None:
-                uncond_video, uncond_audio = self._predict(
+                cond_video, cond_audio = self._predict(
                     video=video,
                     audio=audio,
-                    text=negative,
-                    layout=uncond_layout,
-                    coords=uncond_coords,
-                    timestep=packed_sequence.build_timesteps(
-                        layout=uncond_layout, video_t=step_t, audio_t=step_t
-                    ),
+                    text=prompt,
+                    layout=layout,
+                    coords=coords,
+                    timestep=t,
                     ref_patches=ref_patches,
                     ref_special=ref_special,
                 )
-                cond_video = magi2_guidance.apply_guidance(
-                    latent=video,
-                    cond=cond_video,
-                    uncond=uncond_video,
-                    guidance_scale=video_scale,
-                    skimmed_scale=skimmed_scale,
-                )
-                if cond_audio is not None and uncond_audio is not None:
-                    cond_audio = magi2_guidance.apply_guidance(
-                        latent=audio,
-                        cond=cond_audio,
-                        uncond=uncond_audio,
-                        guidance_scale=audio_scale,
+
+                if negative is not None:
+                    uncond_video, uncond_audio = self._predict(
+                        video=video,
+                        audio=audio,
+                        text=negative,
+                        layout=uncond_layout,
+                        coords=uncond_coords,
+                        timestep=packed_sequence.build_timesteps(
+                            layout=uncond_layout, video_t=step_t, audio_t=step_t
+                        ),
+                        ref_patches=ref_patches,
+                        ref_special=ref_special,
+                    )
+                    cond_video = magi2_guidance.apply_guidance(
+                        latent=video,
+                        cond=cond_video,
+                        uncond=uncond_video,
+                        guidance_scale=video_scale,
                         skimmed_scale=skimmed_scale,
                     )
+                    if cond_audio is not None and uncond_audio is not None:
+                        cond_audio = magi2_guidance.apply_guidance(
+                            latent=audio,
+                            cond=cond_audio,
+                            uncond=uncond_audio,
+                            guidance_scale=audio_scale,
+                            skimmed_scale=skimmed_scale,
+                        )
 
-            video = scheduler.step(cond_video, timestep, video, return_dict=False)[0]
-            if cond_audio is not None:
-                audio = batch.extra["magi2_audio_scheduler"].step(
-                    cond_audio, timestep, audio, return_dict=False
-                )[0]
+                video = scheduler.step(cond_video, timestep, video, return_dict=False)[
+                    0
+                ]
+                if cond_audio is not None:
+                    audio = batch.extra["magi2_audio_scheduler"].step(
+                        cond_audio, timestep, audio, return_dict=False
+                    )[0]
 
         batch.latents = video
         batch.audio_latents = audio
