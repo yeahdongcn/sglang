@@ -16,4 +16,11 @@ def test_musa_toolchain_selects_mcc_and_mp_target(monkeypatch):
         "musa",
         "-mtgpu",
     ]
-    assert toolchain.base_cuda_flags() == ["-fPIC", "-D__MUSA__", "-DUSE_MUSA"]
+    flags = toolchain.base_cuda_flags()
+    assert flags[:3] == ["-fPIC", "-D__MUSA__", "-DUSE_MUSA"]
+    assert "-Od3" in flags
+    assert "-ffast-math" in flags
+    assert "-fmusa-flush-denormals-to-zero" in flags
+    assert "-DENABLE_BF16" in flags
+    assert "-DENABLE_FP8" in flags
+    assert "-DFLASHINFER_ENABLE_FP8_E4M3" in flags

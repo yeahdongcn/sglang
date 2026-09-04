@@ -174,7 +174,34 @@ def base_cxx_flags() -> List[str]:
 
 def base_cuda_flags() -> List[str]:
     if is_musa_runtime():
-        return ["-fPIC", "-D__MUSA__", "-DUSE_MUSA"]
+        # Keep the JIT device flags aligned with kernels/aot/setup_musa.py.
+        # These are MUSA-only: CUDA/HIP retain their existing toolchain flags.
+        flags = [
+            "-fPIC",
+            "-D__MUSA__",
+            "-DUSE_MUSA",
+            "-DNDEBUG",
+            "-DOPERATOR_NAMESPACE=sgl_kernel",
+            "-O3",
+            "-std=c++17",
+            "-Od3",
+            "-ffast-math",
+            "-fmusa-flush-denormals-to-zero",
+            "-fno-strict-aliasing",
+            "-DENABLE_BF16",
+            "-DFLASHINFER_ENABLE_F16",
+            "-DFLASHINFER_ENABLE_BF16",
+        ]
+        if gpu_arch_name() == "mp_31":
+            flags.extend(
+                [
+                    "-DENABLE_FP8",
+                    "-DFLASHINFER_ENABLE_FP8",
+                    "-DFLASHINFER_ENABLE_FP8_E4M3",
+                    "-DFLASHINFER_ENABLE_FP8_E5M2",
+                ]
+            )
+        return flags
     if is_hip_runtime():
         return ["-fPIC", "-D__HIP_PLATFORM_AMD__=1", "-fno-gpu-rdc"]
     return ["-Xcompiler", "-fPIC"]
@@ -223,7 +250,7 @@ def base_link_flags(*, with_device: bool) -> List[str]:
         # mcc/torchada's extension linker uses libmusart for CUDA-runtime
         # symbols. Keep tvm-ffi's link flags and add the MUSA runtime only for
         # device-containing modules.
-        return flags + [*(f"-L{d}" for d in dirs), "-lmusart"]
+        return flags + [*(f"-L{d}" for d in dirs), "-lmusart", "-lmublasLt"]
     if is_hip_runtime():
         return flags + [f"-L{rocm_home()}/lib", "-lamdhip64"]
     return flags + [f"-L{cuda_home()}/lib64", "-lcudart"]
