@@ -5,7 +5,10 @@ from typing import Any, ClassVar
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 
 # 1088 rather than 1080: the VAE stride forces multiples of 16.
-MAGI2_RESOLUTIONS = [(1920, 1088), (896, 512)]
+# 448x256 is the model's 272p comparison tier used by the reference MAGI-2
+# implementation. The two larger shapes remain the native preview/refiner
+# production tiers.
+MAGI2_RESOLUTIONS = [(1920, 1088), (896, 512), (448, 256)]
 
 MAGI2_CLIP_SECONDS = 10.0
 
@@ -75,6 +78,16 @@ class Magi2SamplingParams(SamplingParams):
     def __post_init__(self) -> None:
         if self.supported_resolutions is None:
             self.supported_resolutions = list(MAGI2_RESOLUTIONS)
+        # The preview stage owns its own geometry. For the experimental 272p
+        # comparison tier, inherit the requested output size instead of
+        # silently retaining the native 896x512 preview grid (which would make
+        # a purported 448x256 benchmark execute the larger workload).
+        if (self.width, self.height) == (448, 256) and (
+            self.preview_width,
+            self.preview_height,
+        ) == (896, 512):
+            self.preview_width = 448
+            self.preview_height = 256
         super().__post_init__()
 
     def _validate(self) -> None:
