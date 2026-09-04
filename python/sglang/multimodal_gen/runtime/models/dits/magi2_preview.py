@@ -5,6 +5,8 @@ sequence over a 4-stream (mHC) residual; ``mm_layers`` are dense, the rest MoE.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import nn
 
@@ -33,6 +35,7 @@ from sglang.multimodal_gen.runtime.models.dits.magi2_common import (
     sharded_cu_seqlens,
     swiglu7_interleaved,
 )
+from sglang.multimodal_gen.runtime.distributed.sp_shard_utils import gather_seq
 from sglang.multimodal_gen.runtime.models.dits.magi2_mhc import Magi2MHC
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
@@ -128,6 +131,28 @@ class Magi2PreviewDiT(CachableDiT, LayerwiseOffloadableModuleMixin):
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
+
+        if (
+            os.environ.get("SGLANG_MAGI2_LOCAL_POST_ADAPTER") == "1"
+            and plan.sp_size > 1
+        ):
+            # The adapter is row-wise. Apply it on each SP shard and gather
+            # only compact video/audio channels instead of all residual
+            # streams for every rank.
+            local_video, local_audio = self.post_adapter.forward_local(
+                streams.reshape(streams.shape[0], -1), layout=layout, plan=plan
+            )
+            video_rows = gather_seq(
+                local_video.unsqueeze(0), plan.orig_len, dim=1
+            ).squeeze(0)
+            video = video_rows.index_select(0, layout.video_index)
+            audio = None
+            if local_audio is not None:
+                audio_rows = gather_seq(
+                    local_audio.unsqueeze(0), plan.orig_len, dim=1
+                ).squeeze(0)
+                audio = audio_rows.index_select(0, layout.audio_index)
+            return video, audio
 
         rows = gather_packed_rows(streams.reshape(streams.shape[0], -1), plan=plan)
         return self.post_adapter(rows, layout=layout)
