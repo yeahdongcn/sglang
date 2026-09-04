@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import MethodType, SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
@@ -54,6 +55,7 @@ def test_magi2_denoising_records_each_step(monkeypatch):
     stage.refiner_only = False
     stage.guidance_key = ""
     stage._current_use_nvtx = False
+    stage.step_profile = Mock()
     stage._predict = MethodType(
         lambda self, **kwargs: (torch.ones_like(kwargs["video"]), None),
         stage,
@@ -62,4 +64,5 @@ def test_magi2_denoising_records_each_step(monkeypatch):
     result = stage.forward(batch, server_args)
 
     assert len(batch.metrics.steps) == 2
+    assert stage.step_profile.call_count == 2
     assert torch.equal(result.latents, torch.full_like(result.latents, 2))

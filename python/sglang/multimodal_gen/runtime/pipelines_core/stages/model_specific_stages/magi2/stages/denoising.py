@@ -189,6 +189,12 @@ class Magi2DenoisingStage(DenoisingStage):
                         cond_audio, timestep, audio, return_dict=False
                     )[0]
 
+            # Advance the torch profiler schedule just like the generic
+            # denoising loop. The MAGI-2 loop is custom, so this hook is not
+            # inherited automatically.
+            if not batch.is_warmup:
+                self.step_profile()
+
         batch.latents = video
         batch.audio_latents = audio
         return batch
