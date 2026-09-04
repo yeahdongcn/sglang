@@ -36,7 +36,10 @@ from sglang.multimodal_gen.runtime.models.dits.magi2_common import (
     swiglu7_interleaved,
 )
 from sglang.multimodal_gen.runtime.distributed.sp_shard_utils import gather_seq
-from sglang.multimodal_gen.runtime.models.dits.magi2_mhc import Magi2MHC
+from sglang.multimodal_gen.runtime.models.dits.magi2_mhc import (
+    Magi2MHC,
+    mhc_bf16_norm_enabled,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 MAGI2_PREVIEW_FORWARD_KWARGS = frozenset(
@@ -207,8 +210,12 @@ class Magi2PreviewBlock(nn.Module):
         max_seqlen: int,
     ) -> torch.Tensor:
         flat = streams.reshape(streams.shape[0], -1)
-        # fp32 out: project() upcasts anyway, so bf16 here would round twice.
-        normed = self.mhc_norm(flat, modality_ids, out_dtype=torch.float32)
+        # The default keeps fp32 logits; the opt-in S5000 path may emit BF16
+        # directly so its projection can use the fast BF16 GEMM.
+        norm_dtype = (
+            torch.bfloat16 if mhc_bf16_norm_enabled(flat) else torch.float32
+        )
+        normed = self.mhc_norm(flat, modality_ids, out_dtype=norm_dtype)
 
         h_pre, h_post, h_res = self.mhc_attn.project(normed)
         attn_out = self.attention(
@@ -221,7 +228,7 @@ class Magi2PreviewBlock(nn.Module):
         streams = self.mhc_attn.mix_output(streams, attn_out, h_post, h_res)
 
         flat = streams.reshape(streams.shape[0], -1)
-        normed = self.mhc_norm(flat, modality_ids, out_dtype=torch.float32)
+        normed = self.mhc_norm(flat, modality_ids, out_dtype=norm_dtype)
         h_pre, h_post, h_res = self.mhc_mlp.project(normed)
         mlp_out = self.mlp(
             self.mhc_mlp.mix_input(streams, h_pre), modality_ids=modality_ids
