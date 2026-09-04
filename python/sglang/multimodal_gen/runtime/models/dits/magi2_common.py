@@ -181,10 +181,11 @@ _FAST_RMS_NORM_ENV = "SGLANG_MAGI2_FAST_RMS_NORM"
 
 
 def fast_rms_norm_enabled(x: torch.Tensor) -> bool:
-    return (
-        os.environ.get(_FAST_RMS_NORM_ENV) == "1"
-        and x.device.type in {"cuda", "musa", "privateuseone"}
-    )
+    return os.environ.get(_FAST_RMS_NORM_ENV) == "1" and x.device.type in {
+        "cuda",
+        "musa",
+        "privateuseone",
+    }
 
 
 def modality_runs(modality_ids: torch.Tensor) -> list[tuple[int, int, int]]:
@@ -240,9 +241,7 @@ class Magi2ModalityRMSNorm(nn.Module):
                     self.eps,
                 ).to(dtype)
             normalized = F.rms_norm(rms_x, (self.width,), None, self.eps)
-            weight = self.weight.to(compute_dtype).view(
-                self.num_modality, self.width
-            )
+            weight = self.weight.to(compute_dtype).view(self.num_modality, self.width)
             if modality_ids.numel() == 1:
                 return (normalized * weight[int(modality_ids[0])]).to(dtype)
             gathered = weight.index_select(0, modality_ids)

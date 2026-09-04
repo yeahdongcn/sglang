@@ -47,10 +47,7 @@ def _bf16_project_enabled(tensor: torch.Tensor) -> bool:
 
 def mhc_bf16_norm_enabled(tensor: torch.Tensor) -> bool:
     """Return whether MHC RMSNorm may emit BF16 for the opt-in fast path."""
-    return (
-        os.environ.get(_MHC_BF16_NORM_ENV) == "1"
-        and _bf16_project_enabled(tensor)
-    )
+    return os.environ.get(_MHC_BF16_NORM_ENV) == "1" and _bf16_project_enabled(tensor)
 
 
 def mhc_fast_mix_enabled(streams: torch.Tensor) -> bool:
