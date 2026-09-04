@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import torch
-
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.distributed.cfg_parallel_utils import (
+    run_cfg_parallel,
+    run_two_branch_cfg_parallel,
+)
+from sglang.multimodal_gen.runtime.distributed.cfg_policy import CFGPolicy
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_classifier_free_guidance_world_size,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising import (
     DenoisingStage,
@@ -94,6 +101,128 @@ class Magi2DenoisingStage(DenoisingStage):
             **extra,
         )
 
+    def _build_cfg_policy(
+        self,
+        *,
+        batch: Req,
+        pipeline_config,
+        prompt: torch.Tensor,
+        negative: torch.Tensor,
+        layout,
+        uncond_layout,
+        coords: torch.Tensor,
+        uncond_coords: torch.Tensor,
+        ref_patches: torch.Tensor | None,
+        ref_special: torch.Tensor | None,
+    ) -> CFGPolicy:
+        """Build the two invariant MAGI-2 branch descriptions once per request."""
+        image_kwargs = {}
+        if ref_patches is not None:
+            image_kwargs = {"ref_patches": ref_patches, "ref_special": ref_special}
+        cfg_policy = getattr(pipeline_config, "cfg_policy", None) or CFGPolicy()
+        return cfg_policy.build(
+            batch,
+            image_kwargs,
+            {"text": prompt, "layout": layout, "coords": coords},
+            {"text": negative, "layout": uncond_layout, "coords": uncond_coords},
+        )
+
+    def _predict_cfg_parallel(
+        self,
+        *,
+        batch: Req,
+        policy: CFGPolicy,
+        pipeline_config,
+        video: torch.Tensor,
+        audio: torch.Tensor | None,
+        step_t: torch.Tensor,
+        video_scale: float,
+        audio_scale: float,
+        skimmed_scale: float | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run conditional/unconditional MAGI-2 branches on separate CFG ranks.
+
+        The packed layout can have different text lengths per branch, so each
+        branch builds its own per-token timestep.  Outputs remain full video/audio
+        tensors after the model's SP gather, making the CFG all-reduce shape-safe.
+        """
+        if len(policy.branches) != 2:
+            raise ValueError(
+                "MAGI-2 CFG parallelism currently requires exactly two branches, "
+                f"got {len(policy.branches)}"
+            )
+
+        def predict_branch(branch):
+            branch.configure_batch(batch)
+            branch_kwargs = branch.kwargs
+            branch_t = packed_sequence.build_timesteps(
+                layout=branch_kwargs["layout"], video_t=step_t, audio_t=step_t
+            )
+            predicted_video, predicted_audio = self._predict(
+                video=video,
+                audio=audio,
+                text=branch_kwargs["text"],
+                layout=branch_kwargs["layout"],
+                coords=branch_kwargs["coords"],
+                timestep=branch_t,
+                ref_patches=branch_kwargs.get("ref_patches"),
+                ref_special=branch_kwargs.get("ref_special"),
+            )
+            # The no-audio request returns ``None`` for the second model output;
+            # keep the utility's tensor-only contract in that case.
+            return (
+                predicted_video if audio is None else (predicted_video, predicted_audio)
+            )
+
+        if skimmed_scale is None and get_classifier_free_guidance_world_size() == 2:
+            cfg_scale = video_scale if audio is None else (video_scale, audio_scale)
+            combined = run_two_branch_cfg_parallel(
+                policy,
+                predict_branch,
+                cfg_scale,
+                batch,
+                pipeline_config,
+            )
+            batch.is_cfg_negative = False
+            return (combined, None) if audio is None else combined
+
+        # Skimmed guidance (and any future N-branch policy) needs both predictions
+        # locally.  The generic dispatcher performs the required CFG all-gather.
+        predictions = run_cfg_parallel(policy, predict_branch)
+        positive = predictions[0]
+        negative = predictions[1]
+        if audio is None:
+            combined_video = magi2_guidance.apply_guidance(
+                latent=video,
+                cond=positive,
+                uncond=negative,
+                guidance_scale=video_scale,
+                skimmed_scale=skimmed_scale,
+            )
+            batch.is_cfg_negative = False
+            return combined_video, None
+
+        positive_video, positive_audio = positive
+        negative_video, negative_audio = negative
+        combined_video = magi2_guidance.apply_guidance(
+            latent=video,
+            cond=positive_video,
+            uncond=negative_video,
+            guidance_scale=video_scale,
+            skimmed_scale=skimmed_scale,
+        )
+        combined_audio = None
+        if positive_audio is not None and negative_audio is not None:
+            combined_audio = magi2_guidance.apply_guidance(
+                latent=audio,
+                cond=positive_audio,
+                uncond=negative_audio,
+                guidance_scale=audio_scale,
+                skimmed_scale=skimmed_scale,
+            )
+        batch.is_cfg_negative = False
+        return combined_video, combined_audio
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         if self.refiner_only and not batch.extra["magi2_enable_refiner"]:
             return batch
@@ -117,6 +246,35 @@ class Magi2DenoisingStage(DenoisingStage):
         audio = batch.audio_latents
         scheduler = batch.scheduler
 
+        # Build invariant branch metadata once.  The normal CFG1 path below stays
+        # byte-for-byte in its existing serial order when this flag is disabled.
+        cfg_policy = None
+        if (
+            negative is not None
+            and getattr(batch, "do_classifier_free_guidance", True)
+            and getattr(server_args, "enable_cfg_parallel", False)
+        ):
+            cfg_policy = self._build_cfg_policy(
+                batch=batch,
+                pipeline_config=server_args.pipeline_config,
+                prompt=prompt,
+                negative=negative,
+                layout=layout,
+                uncond_layout=uncond_layout,
+                coords=coords,
+                uncond_coords=uncond_coords,
+                ref_patches=(
+                    batch.extra["magi2_ref_patches"]
+                    if layout.ref_patch_index.numel()
+                    else None
+                ),
+                ref_special=(
+                    batch.extra["magi2_ref_special"]
+                    if layout.ref_patch_index.numel()
+                    else None
+                ),
+            )
+
         ref_patches = (
             batch.extra["magi2_ref_patches"] if layout.ref_patch_index.numel() else None
         )
@@ -137,22 +295,35 @@ class Magi2DenoisingStage(DenoisingStage):
             ):
                 # Per token, not a scalar: text and ref-image rows must read zero.
                 step_t = timestep.to(device)
-                t = packed_sequence.build_timesteps(
-                    layout=layout, video_t=step_t, audio_t=step_t
-                )
 
-                cond_video, cond_audio = self._predict(
-                    video=video,
-                    audio=audio,
-                    text=prompt,
-                    layout=layout,
-                    coords=coords,
-                    timestep=t,
-                    ref_patches=ref_patches,
-                    ref_special=ref_special,
-                )
+                if cfg_policy is not None:
+                    cond_video, cond_audio = self._predict_cfg_parallel(
+                        batch=batch,
+                        policy=cfg_policy,
+                        pipeline_config=server_args.pipeline_config,
+                        video=video,
+                        audio=audio,
+                        step_t=step_t,
+                        video_scale=video_scale,
+                        audio_scale=audio_scale,
+                        skimmed_scale=skimmed_scale,
+                    )
+                else:
+                    t = packed_sequence.build_timesteps(
+                        layout=layout, video_t=step_t, audio_t=step_t
+                    )
+                    cond_video, cond_audio = self._predict(
+                        video=video,
+                        audio=audio,
+                        text=prompt,
+                        layout=layout,
+                        coords=coords,
+                        timestep=t,
+                        ref_patches=ref_patches,
+                        ref_special=ref_special,
+                    )
 
-                if negative is not None:
+                if negative is not None and cfg_policy is None:
                     uncond_video, uncond_audio = self._predict(
                         video=video,
                         audio=audio,

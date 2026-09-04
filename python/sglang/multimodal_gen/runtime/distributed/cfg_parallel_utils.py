@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Callable
 
 import torch
-
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.distributed.cfg_policy import (
     _apply_cfg_postprocess,
@@ -138,7 +138,7 @@ def run_cfg_parallel(
 def run_two_branch_cfg_parallel(
     policy: CFGPolicy,
     predict_fn: Callable[[CFGBranch], torch.Tensor | tuple[torch.Tensor, ...]],
-    cfg_scale: float,
+    cfg_scale: float | Sequence[float],
     batch,
     pipeline_config,
 ) -> torch.Tensor | tuple[torch.Tensor, ...]:
@@ -151,18 +151,39 @@ def run_two_branch_cfg_parallel(
 
     cfg_rank = get_classifier_free_guidance_rank()
     pred_t = _run(predict_fn, cfg_rank, policy.branches)
+    scales = _normalize_cfg_scales(cfg_scale, len(pred_t))
 
     if cfg_rank == 0:
-        partial = tuple(cfg_scale * p for p in pred_t)
+        partial = tuple(scale * p for scale, p in zip(scales, pred_t))
         cond_t = pred_t
     else:
-        partial = tuple((1 - cfg_scale) * p for p in pred_t)
+        partial = tuple((1 - scale) * p for scale, p in zip(scales, pred_t))
         cond_t = tuple(torch.empty_like(p) for p in pred_t)
 
     results = [cfg_model_parallel_all_reduce(p) for p in partial]
     cond_t = tuple(get_cfg_group().broadcast(p, src=0) for p in cond_t)
     results[0] = _apply_cfg_postprocess(results[0], cond_t[0], batch, pipeline_config)
     return _unwrap(tuple(results))
+
+
+def _normalize_cfg_scales(
+    cfg_scale: float | Sequence[float], num_outputs: int
+) -> tuple[float, ...]:
+    """Expand a scalar CFG scale or validate one scale per model output.
+
+    Most diffusion models return one tensor and keep the scalar API.  Joint
+    audio/video models such as MAGI-2 use independent guidance scales for each
+    output, while still needing one branch-parallel model invocation.
+    """
+    if isinstance(cfg_scale, Sequence) and not isinstance(cfg_scale, (str, bytes)):
+        scales = tuple(float(value) for value in cfg_scale)
+        if len(scales) != num_outputs:
+            raise ValueError(
+                "CFG scale sequence must match the number of model outputs: "
+                f"got {len(scales)} values for {num_outputs} outputs"
+            )
+        return scales
+    return (float(cfg_scale),) * num_outputs
 
 
 def dispatch_branches(n_branches: int, n_ranks: int) -> list[list[int]]:

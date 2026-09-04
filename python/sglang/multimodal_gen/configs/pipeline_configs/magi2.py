@@ -78,13 +78,18 @@ class Magi2PipelineConfig(PipelineConfig):
     output_audio_sample_rate: int | None = 44100
     output_audio_channels: int | None = 2
 
-    # Defaults to world size and must divide moe_num_heads (12), so 8 ranks need an
-    # explicit ep_size of 4: two expert-parallel groups, each holding all 12 heads.
+    # In the legacy CFG1/SP8 layout this defaults to the world size, and callers
+    # use ``ep_size=4`` to keep the 12-head router divisible.  In the experimental
+    # CFG2/SP4 layout the default is the per-CFG SP group (4 ranks), so an
+    # explicit pipeline-config override is not needed.
     ep_size: int | None = None
 
     def get_model_deployment_config(self) -> ModelDeploymentConfig:
         return ModelDeploymentConfig(
-            supports_cfg_parallel=False,
+            # CFG parallel is intentionally opt-in for MAGI-2.  The default
+            # deployment remains CFG1/SP8 until the experimental path has been
+            # validated on real hardware.
+            supports_cfg_parallel=True,
             auto_enable_cfg_parallel=False,
             keep_resident_components=("vae", "turbo_vae", "audio_vae"),
         )
@@ -113,33 +118,79 @@ class Magi2PipelineConfig(PipelineConfig):
         super().validate_server_args(server_args)
         self._warn_about_allocator()
 
-        if server_args.enable_cfg_parallel:
-            raise ValueError(
-                "MAGI-2's denoise loop runs both CFG branches itself; "
-                "--enable-cfg-parallel would double-apply the guidance"
-            )
+        cfg_parallel = bool(getattr(server_args, "enable_cfg_parallel", False))
+        cfg_degree = int(
+            getattr(server_args, "cfg_parallel_degree", None)
+            or (2 if cfg_parallel else 1)
+        )
+        num_gpus = int(getattr(server_args, "num_gpus", 1))
+        tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+        dp_size = int(getattr(server_args, "dp_size", 1) or 1)
+        sp_degree = int(
+            getattr(server_args, "sp_degree", None)
+            or (num_gpus // max(1, cfg_degree) if cfg_parallel else num_gpus)
+        )
+        ulysses_degree = int(
+            getattr(server_args, "ulysses_degree", None)
+            or (sp_degree if cfg_parallel else 1)
+        )
+        ring_degree = int(getattr(server_args, "ring_degree", 1) or 1)
 
-        if server_args.tp_size > 1:
+        if cfg_parallel:
+            # This branch is deliberately narrow: two CFG branches each run over
+            # one SP4 replica.  Keeping the contract explicit prevents a partially
+            # initialized model from silently mixing CFG and sequence groups.
+            if cfg_degree != 2:
+                raise ValueError(
+                    "MAGI-2 experimental CFG parallelism currently supports only "
+                    f"cfg_parallel_degree=2, got {cfg_degree}"
+                )
+            if tp_size != 1:
+                raise ValueError(
+                    "MAGI-2 CFG2/SP4 requires --tp-size 1; tensor parallelism "
+                    f"({tp_size}) would create a second, unsupported weight axis"
+                )
+            if sp_degree != 4 or ulysses_degree != 4 or ring_degree != 1:
+                raise ValueError(
+                    "MAGI-2 experimental CFG parallelism requires "
+                    "--sp-degree 4 --ulysses-degree 4 --ring-degree 1; got "
+                    f"sp={sp_degree}, ulysses={ulysses_degree}, ring={ring_degree}"
+                )
+            expected_world = dp_size * tp_size * cfg_degree * sp_degree
+            if num_gpus != expected_world:
+                raise ValueError(
+                    "MAGI-2 CFG2/SP4 parallel dimensions must consume the full "
+                    f"world: dp={dp_size}, tp={tp_size}, cfg={cfg_degree}, "
+                    f"sp={sp_degree} => {expected_world}, got num_gpus={num_gpus}"
+                )
+
+        if not cfg_parallel and tp_size > 1:
             raise ValueError(
                 f"MAGI-2 has no tensor-parallel layers; --tp-size "
-                f"({server_args.tp_size}) would leave those ranks duplicating "
+                f"({tp_size}) would leave those ranks duplicating "
                 "work instead of sharding the sequence (measured 1.7x slower at "
                 "tp=2, 4.9x at tp=4). Put the whole degree in --ulysses-degree."
             )
 
-        if server_args.ring_degree > 1:
+        if not cfg_parallel and ring_degree > 1:
             raise ValueError(
                 "MAGI-2 shards its packed sequence over the full SP group but "
                 "exchanges attention heads over the Ulysses group only; "
-                f"--ring-degree ({server_args.ring_degree}) must be 1. Put the "
+                f"--ring-degree ({ring_degree}) must be 1. Put the "
                 "whole degree in --ulysses-degree."
             )
 
-        num_gpus = server_args.num_gpus
-        ep_size = self.ep_size or num_gpus
-        if num_gpus % ep_size:
+        # Expert groups must not cross CFG branches.  Therefore the implicit EP
+        # degree is one per-CFG SP group in CFG2/SP4, while the legacy path keeps
+        # its historical world-size default.
+        ep_size = self.ep_size or (sp_degree if cfg_parallel else num_gpus)
+        if ep_size < 1:
+            raise ValueError(f"ep_size must be positive, got {ep_size}")
+        ep_divisor = sp_degree if cfg_parallel else num_gpus
+        if ep_divisor % ep_size:
             raise ValueError(
-                f"num_gpus ({num_gpus}) must be divisible by ep_size ({ep_size})"
+                f"{'sp_degree' if cfg_parallel else 'num_gpus'} ({ep_divisor}) "
+                f"must be divisible by ep_size ({ep_size})"
             )
 
         moe_heads = self.dit_config.arch_config.moe_num_heads
@@ -149,8 +200,9 @@ class Magi2PipelineConfig(PipelineConfig):
                 f"ranks; ep_size ({ep_size}) must divide {moe_heads}"
             )
 
-        # Ulysses axes only. The MoE head axis is checked against ep_size above,
-        # which is what shards it; ep_size may be smaller than num_gpus.
+        # Attention heads are sharded over each SP group in CFG mode.  Keep the
+        # historical world-size check for CFG1 deployments (including any
+        # unusual legacy DP layout) until that topology is separately audited.
         preview = self.dit_config.arch_config
         axes = {"preview attention heads": preview.num_attention_heads}
         if self.enable_refiner:
@@ -158,10 +210,11 @@ class Magi2PipelineConfig(PipelineConfig):
             axes["refiner attention heads"] = refiner.num_attention_heads
             axes["refiner KV heads"] = refiner.num_query_groups
 
+        attention_degree = sp_degree if cfg_parallel else num_gpus
         for name, count in sorted(axes.items(), key=lambda item: item[1]):
-            if count % num_gpus:
+            if count % attention_degree:
                 raise ValueError(
-                    f"MAGI-2 shards {name} ({count}) across ranks; num_gpus "
-                    f"({num_gpus}) must divide it. Valid counts are "
+                    f"MAGI-2 shards {name} ({count}) across the SP group; "
+                    f"degree ({attention_degree}) must divide it. Valid counts are "
                     f"{[n for n in range(1, max(axes.values()) + 1) if all(c % n == 0 for c in axes.values())]}"
                 )
