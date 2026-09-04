@@ -6,6 +6,7 @@ Base class for all pipeline executors.
 """
 
 import contextlib
+import os
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, List
@@ -124,14 +125,20 @@ class PipelineExecutor(ABC):
         if profiler:
             profiler.step_stage()
 
+    @staticmethod
+    def _profile_dump_rank() -> int | None:
+        """Select rank(s) that should export a diffusion profiler trace."""
+        return (
+            None if os.environ.get("SGLANG_DIFFUSION_PROFILE_ALL_RANKS") == "1" else 0
+        )
+
     def execute_with_profiling(
         self,
         stages: List["PipelineStage"],
         batch: Req,
         server_args: ServerArgs,
     ) -> OutputBatch:
-
-        with self.profile_execution(batch, dump_rank=0):
+        with self.profile_execution(batch, dump_rank=self._profile_dump_rank()):
             with current_platform.inference_mode():
                 batch = self.execute(stages, batch, server_args)
 
@@ -144,7 +151,7 @@ class PipelineExecutor(ABC):
         server_args: ServerArgs,
     ):
         """Execute a grouped request under the same profiler as a single request."""
-        with self.profile_execution(batches[0], dump_rank=0):
+        with self.profile_execution(batches[0], dump_rank=self._profile_dump_rank()):
             with current_platform.inference_mode():
                 batches = self.execute_group(stages, batches, server_args)
         return batches
@@ -156,7 +163,7 @@ class PipelineExecutor(ABC):
         server_args: ServerArgs,
     ):
         """Run the AR stage as a group, then yield each completed DiT request."""
-        with self.profile_execution(batches[0], dump_rank=0):
+        with self.profile_execution(batches[0], dump_rank=self._profile_dump_rank()):
             with current_platform.inference_mode():
                 yield from self.execute_group_sequentially(
                     stages,
