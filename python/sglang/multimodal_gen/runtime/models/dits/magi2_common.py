@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import os
 
 import msgspec
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.weak import WeakTensorKeyDictionary
 
@@ -87,13 +89,18 @@ def apply_partial_rope(
         and x.device.type in {"cuda", "musa", "privateuseone"}
         and x.dtype == torch.float32
         and x.is_contiguous()
-        and cos.is_contiguous()
-        and sin.is_contiguous()
         and cos.dtype == torch.float32
         and sin.dtype == torch.float32
         and cos.shape == sin.shape
         and cos.shape[0] == x.shape[0]
+        and os.environ.get("SGLANG_MAGI2_FAST_ROPE") == "1"
     ):
+        # ``tensor_split`` returns strided views of the packed rope.  The
+        # dedicated kernel consumes one contiguous [tokens, rotary_half] row;
+        # materialize the small cosine/sine views instead of silently falling
+        # back to the generic broadcast path.
+        cos = cos.contiguous()
+        sin = sin.contiguous()
         return magi2_partial_rope(x, cos, sin)
 
     rotated, passthrough = x[..., :rotary_dim], x[..., rotary_dim:]
@@ -170,6 +177,14 @@ def gather_packed_rows(local: torch.Tensor, *, plan) -> torch.Tensor:
 
 
 _MODALITY_RUNS = WeakTensorKeyDictionary()
+_FAST_RMS_NORM_ENV = "SGLANG_MAGI2_FAST_RMS_NORM"
+
+
+def fast_rms_norm_enabled(x: torch.Tensor) -> bool:
+    return (
+        os.environ.get(_FAST_RMS_NORM_ENV) == "1"
+        and x.device.type in {"cuda", "musa", "privateuseone"}
+    )
 
 
 def modality_runs(modality_ids: torch.Tensor) -> list[tuple[int, int, int]]:
@@ -208,6 +223,34 @@ class Magi2ModalityRMSNorm(nn.Module):
         out_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         dtype = out_dtype or x.dtype
+
+        if fast_rms_norm_enabled(x):
+            # The hand-written fp32 reduction below dispatches several generic
+            # elementwise kernels on MUSA.  aten.rms_norm is a single fused
+            # reduction/scale kernel; retain fp32 accumulation whenever the
+            # caller asks for fp32 output and use the input dtype for the
+            # explicitly opt-in BF16 MHC path.
+            compute_dtype = torch.float32 if dtype == torch.float32 else x.dtype
+            rms_x = x.to(compute_dtype)
+            if self.num_modality == 1:
+                return F.rms_norm(
+                    rms_x,
+                    (self.width,),
+                    self.weight.to(compute_dtype),
+                    self.eps,
+                ).to(dtype)
+            normalized = F.rms_norm(rms_x, (self.width,), None, self.eps)
+            weight = self.weight.to(compute_dtype).view(
+                self.num_modality, self.width
+            )
+            if modality_ids.numel() == 1:
+                return (normalized * weight[int(modality_ids[0])]).to(dtype)
+            gathered = weight.index_select(0, modality_ids)
+            return (
+                normalized
+                * gathered.reshape(-1, *(1,) * (normalized.dim() - 2), self.width)
+            ).to(dtype)
+
         x = x.float()
         x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         if self.num_modality == 1:
