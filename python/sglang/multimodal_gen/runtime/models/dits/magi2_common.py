@@ -13,6 +13,9 @@ from sglang.multimodal_gen.runtime.layers.moe_multihead import (
     SWIGLU7_ALPHA,
     SWIGLU7_LIMIT,
 )
+from sglang.multimodal_gen.runtime.layers.magi2_rope_kernel import (
+    magi2_partial_rope,
+)
 
 # Coordinate columns are (t, h, w, T, H, W, ref_T, ref_H, ref_W).
 MAGI2_COORD_COLUMNS = 9
@@ -78,6 +81,20 @@ def apply_partial_rope(
     rotary_dim = cos.shape[-1] * 2
     if rotary_dim > x.shape[-1]:
         raise ValueError(f"rotary_dim {rotary_dim} exceeds head_dim {x.shape[-1]}")
+
+    if (
+        x.ndim == 3
+        and x.device.type in {"cuda", "musa", "privateuseone"}
+        and x.dtype == torch.float32
+        and x.is_contiguous()
+        and cos.is_contiguous()
+        and sin.is_contiguous()
+        and cos.dtype == torch.float32
+        and sin.dtype == torch.float32
+        and cos.shape == sin.shape
+        and cos.shape[0] == x.shape[0]
+    ):
+        return magi2_partial_rope(x, cos, sin)
 
     rotated, passthrough = x[..., :rotary_dim], x[..., rotary_dim:]
     # Tile, not interleave: the rotation pairs channel i with i + rotary_dim // 2.
