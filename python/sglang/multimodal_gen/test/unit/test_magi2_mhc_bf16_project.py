@@ -65,3 +65,17 @@ def test_bf16_norm_gate_requires_bf16_project(monkeypatch):
 
     monkeypatch.setenv("SGLANG_MAGI2_MHC_BF16_PROJECT", "1")
     assert mhc_module.mhc_bf16_norm_enabled(x)
+
+
+def test_fast_mix_gate_is_opt_in_and_preserves_cpu_fallback(monkeypatch):
+    mhc = Magi2MHC(num_stream=4, hidden_size=8)
+    torch.manual_seed(29)
+    streams = torch.randn(7, 4, 8, dtype=torch.bfloat16)
+    h_pre = torch.randn(7, 4)
+    monkeypatch.setenv("SGLANG_MAGI2_MHC_FAST_MIX", "1")
+    expected = mhc.mix_input(streams, h_pre)
+    assert not mhc_module.mhc_fast_mix_enabled(streams)
+
+    monkeypatch.setattr(mhc_module, "_is_musa_tensor", lambda _: True)
+    fast = mhc.mix_input(streams, h_pre)
+    torch.testing.assert_close(fast, expected, rtol=0, atol=1e-2)

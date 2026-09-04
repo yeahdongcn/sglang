@@ -16,6 +16,7 @@ from sglang.multimodal_gen.runtime.layers.magi2_mhc_kernel import (
 
 _MHC_BF16_PROJECT_ENV = "SGLANG_MAGI2_MHC_BF16_PROJECT"
 _MHC_BF16_NORM_ENV = "SGLANG_MAGI2_MHC_BF16_NORM"
+_MHC_FAST_MIX_ENV = "SGLANG_MAGI2_MHC_FAST_MIX"
 
 
 def _is_cuda_alike_tensor(tensor: torch.Tensor | torch.device) -> bool:
@@ -49,6 +50,17 @@ def mhc_bf16_norm_enabled(tensor: torch.Tensor) -> bool:
     return (
         os.environ.get(_MHC_BF16_NORM_ENV) == "1"
         and _bf16_project_enabled(tensor)
+    )
+
+
+def mhc_fast_mix_enabled(streams: torch.Tensor) -> bool:
+    """Gate the MUSA reduction form that avoids a slow generic einsum path."""
+    return (
+        os.environ.get(_MHC_FAST_MIX_ENV) == "1"
+        and _is_musa_tensor(streams)
+        and streams.dtype == torch.bfloat16
+        and streams.ndim == 3
+        and streams.shape[1] == 4
     )
 
 
@@ -143,6 +155,11 @@ class Magi2MHC(nn.Module):
 
     def mix_input(self, streams: torch.Tensor, h_pre: torch.Tensor) -> torch.Tensor:
         gate = torch.sigmoid(self.alpha_pre * self.matmul_scale * h_pre + self.bias_pre)
+        if mhc_fast_mix_enabled(streams):
+            # On S5000 this reduction is lowered to a compact vector kernel;
+            # the equivalent einsum dispatches a generic BMM and is ~7x slower
+            # for the MAGI-2 [T, 4, 3072] shape.
+            return (gate.to(streams.dtype).unsqueeze(-1) * streams).sum(dim=1)
         # Left in torch: inductor fuses this into its consumer, where a custom op
         # is opaque and cannot be fused (measured 5s/clip slower as a kernel).
         return torch.einsum("tn,tnc->tc", gate.to(streams.dtype), streams)
