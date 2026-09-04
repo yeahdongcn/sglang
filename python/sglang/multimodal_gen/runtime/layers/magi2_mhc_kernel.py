@@ -59,15 +59,33 @@ def _mhc_sinkhorn_kernel(
 ):
     """Run the fixed-size Sinkhorn normalization in one kernel per token."""
     token = tl.program_id(0)
-    offs = tl.arange(0, NUM_STREAM * NUM_STREAM)
-    matrix = tl.load(h_ptr + token * NUM_STREAM * NUM_STREAM + offs).reshape(
-        (NUM_STREAM, NUM_STREAM)
-    )
-    matrix = tl.exp(matrix - tl.max(matrix))
+    offs = tl.arange(0, 16)
+    rows = offs // 4
+    cols = offs - rows * 4
+    matrix = tl.load(h_ptr + token * NUM_STREAM * NUM_STREAM + offs)
+    matrix = tl.exp(matrix - tl.max(matrix, axis=0))
     for _ in tl.static_range(NUM_ITERS):
-        matrix = matrix / (tl.sum(matrix, axis=1)[:, None] + eps)
-        matrix = matrix / (tl.sum(matrix, axis=0)[None, :] + eps)
-    tl.store(out_ptr + token * NUM_STREAM * NUM_STREAM + offs, matrix.reshape(-1))
+        col0 = tl.sum(tl.where(cols == 0, matrix, 0.0), axis=0)
+        col1 = tl.sum(tl.where(cols == 1, matrix, 0.0), axis=0)
+        col2 = tl.sum(tl.where(cols == 2, matrix, 0.0), axis=0)
+        col3 = tl.sum(tl.where(cols == 3, matrix, 0.0), axis=0)
+        col_sum = tl.where(
+            cols == 0,
+            col0,
+            tl.where(cols == 1, col1, tl.where(cols == 2, col2, col3)),
+        )
+        matrix = matrix / (col_sum + eps)
+        row0 = tl.sum(tl.where(rows == 0, matrix, 0.0), axis=0)
+        row1 = tl.sum(tl.where(rows == 1, matrix, 0.0), axis=0)
+        row2 = tl.sum(tl.where(rows == 2, matrix, 0.0), axis=0)
+        row3 = tl.sum(tl.where(rows == 3, matrix, 0.0), axis=0)
+        row_sum = tl.where(
+            rows == 0,
+            row0,
+            tl.where(rows == 1, row1, tl.where(rows == 2, row2, row3)),
+        )
+        matrix = matrix / (row_sum + eps)
+    tl.store(out_ptr + token * NUM_STREAM * NUM_STREAM + offs, matrix)
 
 
 def _mhc_mix_output(
@@ -111,8 +129,10 @@ def _mhc_sinkhorn(h: torch.Tensor, *, num_iters: int, eps: float) -> torch.Tenso
     if h.ndim != 3 or h.shape[-1] != h.shape[-2]:
         raise ValueError(f"expected [tokens, streams, streams], got {tuple(h.shape)}")
     tokens, num_stream, _ = h.shape
-    if num_stream > 8 or num_iters > 64:
-        raise ValueError("fixed-size Sinkhorn kernel supports streams<=8 and iters<=64")
+    if num_stream != 4 or num_iters > 64:
+        raise ValueError(
+            "fixed-size Sinkhorn kernel supports exactly 4 streams and iters<=64"
+        )
     out = torch.empty_like(h, dtype=torch.float32)
     _mhc_sinkhorn_kernel[(tokens,)](
         h.contiguous(),
