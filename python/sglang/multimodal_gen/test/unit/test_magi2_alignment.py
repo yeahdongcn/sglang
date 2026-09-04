@@ -8,6 +8,7 @@ from sglang.multimodal_gen.configs.models.encoders.magi2 import (
 )
 from sglang.multimodal_gen.configs.sample.magi2 import (
     MAGI2_NEGATIVE_PROMPT,
+    MAGI2_RESOLUTIONS,
     Magi2SamplingParams,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
@@ -97,6 +98,19 @@ class TestResizePad(unittest.TestCase):
 
 
 class TestShippedDefaults(unittest.TestCase):
+    def test_272p_request_uses_the_matching_preview_grid(self):
+        params = Magi2SamplingParams(
+            prompt="x",
+            width=448,
+            height=256,
+            num_frames=125,
+            fps=12.5,
+            num_inference_steps=4,
+        )
+        self.assertIn((448, 256), MAGI2_RESOLUTIONS)
+        self.assertEqual((params.width, params.height), (448, 256))
+        self.assertEqual((params.preview_width, params.preview_height), (448, 256))
+
     def test_negative_prompt_covers_video_audio_and_voice(self):
         params = Magi2SamplingParams(prompt="x")
         self.assertEqual(params.negative_prompt, MAGI2_NEGATIVE_PROMPT)
