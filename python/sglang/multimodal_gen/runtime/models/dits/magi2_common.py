@@ -345,3 +345,37 @@ class Magi2PostAdapter(nn.Module):
                 self.final_norm_audio(rows.index_select(0, layout.audio_index))
             )
         return video, audio
+
+    def forward_local(
+        self, rows: torch.Tensor, *, layout: Magi2SegmentLayout, plan
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply the row-wise output adapter before SP gather."""
+        rows = rows.float()
+        start = plan.sp_rank * plan.local_len
+        stop = start + plan.local_len
+
+        def local_output(index: torch.Tensor, norm: nn.Module, linear: nn.Module):
+            mask = (index >= start) & (index < stop)
+            local_index = index[mask] - start
+            output = torch.zeros(
+                (plan.local_len, linear.out_features),
+                dtype=rows.dtype,
+                device=rows.device,
+            )
+            if local_index.numel():
+                output.index_copy_(
+                    0,
+                    local_index,
+                    linear(norm(rows.index_select(0, local_index))),
+                )
+            return output
+
+        video = local_output(
+            layout.video_index, self.final_norm_video, self.final_linear_video
+        )
+        audio = None
+        if layout.audio_index.numel():
+            audio = local_output(
+                layout.audio_index, self.final_norm_audio, self.final_linear_audio
+            )
+        return video, audio
