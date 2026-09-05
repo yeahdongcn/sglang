@@ -18,6 +18,7 @@ from sglang.multimodal_gen.runtime.layers.moe_multihead import (
 from sglang.multimodal_gen.runtime.layers.magi2_rope_kernel import (
     magi2_partial_rope,
 )
+from sglang.multimodal_gen.runtime.layers.magi2_swiglu_kernel import magi2_swiglu7
 
 # Coordinate columns are (t, h, w, T, H, W, ref_T, ref_H, ref_W).
 MAGI2_COORD_COLUMNS = 9
@@ -115,6 +116,14 @@ def apply_partial_rope(
 
 def swiglu7_interleaved(x: torch.Tensor) -> torch.Tensor:
     """Interleaved spelling; the MoE kernel uses the chunked one. Not interchangeable."""
+    if (
+        os.environ.get("SGLANG_MAGI2_FAST_SWIGLU7") == "1"
+        and x.device.type in {"cuda", "musa", "privateuseone"}
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and x.shape[-1] % 2 == 0
+    ):
+        return magi2_swiglu7(x)
     # fp32 in, input dtype out: bf16 spacing is coarse at the +/-7.0 clamp.
     dtype = x.dtype
     x = x.float()
