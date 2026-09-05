@@ -7,10 +7,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
-# gate * sigmoid(alpha * gate) * (up + 1), gate clamped above and up both ways;
-# swiglu_no_interleaved_with_alpha_and_limit in the Triton runner.
-SWIGLU7_ALPHA = 1.702
-SWIGLU7_LIMIT = 7.0
+from sglang.multimodal_gen.runtime.layers.magi2_constants import (
+    SWIGLU7_ALPHA,
+    SWIGLU7_LIMIT,
+)
 
 # The reference router L1-normalizes with this epsilon. sglang's single-head
 # router uses 1e-20, which is a visible difference at bf16 score magnitudes.

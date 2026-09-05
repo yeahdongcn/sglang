@@ -118,7 +118,7 @@ def swiglu7_interleaved(x: torch.Tensor) -> torch.Tensor:
     """Interleaved spelling; the MoE kernel uses the chunked one. Not interchangeable."""
     if (
         os.environ.get("SGLANG_MAGI2_FAST_SWIGLU7") == "1"
-        and x.device.type in {"cuda", "musa", "privateuseone"}
+        and x.device.type in {"musa", "privateuseone"}
         and x.dtype == torch.bfloat16
         and x.is_contiguous()
         and x.shape[-1] % 2 == 0
