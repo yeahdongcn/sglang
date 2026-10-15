@@ -22,7 +22,14 @@ using namespace mlx::core;
 
 namespace {
 
-constexpr const char* kLibraryName = "sgl_metal_kernels";
+#ifndef MLX_EXTENSION_NAME
+#define MLX_EXTENSION_NAME sgl_metal_kernels
+#endif
+#ifndef MLX_METAL_LIBRARY_NAME
+#define MLX_METAL_LIBRARY_NAME "sgl_metal_kernels"
+#endif
+
+constexpr const char* kLibraryName = MLX_METAL_LIBRARY_NAME;
 
 MTL::Library* g_library = nullptr;
 
@@ -305,7 +312,7 @@ nb::tuple rope_pool_fused_py(
 
 }  // namespace
 
-NB_MODULE(_metal, m) {
+NB_MODULE(MLX_EXTENSION_NAME, m) {
   m.def("register_library", &register_library_impl, nb::arg("path"));
 
   m.def(
