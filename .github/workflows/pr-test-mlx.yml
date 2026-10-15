@@ -15,6 +15,7 @@ on:
         options:
           - ''
           - stage-a-unit-test-mlx
+          - stage-a-metal-extension-build
           - stage-b-e2e-test-mlx
           - stage-a-unit-test-mps
           - stage-b-e2e-test-mps
@@ -121,6 +122,70 @@ jobs:
         timeout-minutes: 15
         run: |
           uv run python test/run_suite.py --hw mlx --suite stage-a-unit-test-mlx
+
+  # Build the optional AOT extension with MLX's new public build API. The
+  # merged MLX change is pinned until a release containing mlx.extension is
+  # available; the pin keeps this smoke test reproducible in the meantime.
+  stage-a-metal-extension-build:
+    needs: [check-changes, pr-gate]
+    if: |
+      !cancelled() && (
+        (needs.pr-gate.result == 'success' &&
+          needs.check-changes.outputs.sgl_kernel == 'true') ||
+        (github.event_name == 'workflow_dispatch' &&
+         inputs.target_stage == 'stage-a-metal-extension-build')
+      )
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SGLANG_IS_IN_CI: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Verify Apple Silicon runner
+        run: |
+          echo "uname -m: $(uname -m)"
+          python3 -c "import platform; assert platform.machine()=='arm64', platform.machine(); print('machine:', platform.machine(), 'system:', platform.system())"
+
+      - name: Install MLX extension build requirements
+        timeout-minutes: 30
+        run: |
+          uv venv
+          uv pip install \
+            "mlx @ git+https://github.com/ml-explore/mlx.git@bb3e2d37660f457c6bce39a6b6dfd63afb5acd9b" \
+            "cmake>=3.25" "nanobind==3.1.0"
+
+      - name: Build and import the Metal extension
+        timeout-minutes: 20
+        run: |
+          uv run python python/sglang/kernels/aot/setup_metal.py build_ext --inplace
+          PYTHONPATH=python/sglang/kernels/aot/python uv run python - <<'PY'
+          from pathlib import Path
+
+          import sgl_kernel.sgl_metal_kernels as extension
+
+          package_dir = Path(extension.__file__).resolve().parent
+          metallib = package_dir / "sgl_metal_kernels.metallib"
+          stub = package_dir / "sgl_metal_kernels.pyi"
+          assert metallib.is_file(), metallib
+          assert stub.is_file(), stub
+          assert hasattr(extension, "register_library")
+          assert hasattr(extension, "rope_pool_fused")
+          print("native extension:", extension.__file__)
+          print("metallib:", metallib)
+          print("stub:", stub)
+          PY
 
   stage-b-e2e-test-mlx:
     needs: [check-changes, pr-gate]
@@ -262,6 +327,7 @@ jobs:
         pr-gate,
         check-changes,
         stage-a-unit-test-mlx,
+        stage-a-metal-extension-build,
         stage-b-e2e-test-mlx,
         stage-a-unit-test-mps,
         stage-b-e2e-test-mps,

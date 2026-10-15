@@ -30,6 +30,16 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
 Verify the compiler with `xcrun -sdk macosx metal --version`.
 
+The AOT build now uses MLX's `mlx.extension.MetalExtension` API (merged in
+[MLX PR #4004](https://github.com/ml-explore/mlx/pull/4004)). This API is not
+included in the MLX 0.32 wheels yet. Until the next MLX release, install an
+MLX build containing that change and CMake 3.25 or newer before compiling the
+optional kernels:
+
+```bash
+uv pip install "mlx @ git+https://github.com/ml-explore/mlx.git@bb3e2d37660f457c6bce39a6b6dfd63afb5acd9b" cmake "nanobind==3.1.0"
+```
+
 ## Install SGLang
 
 You can install SGLang using one of the methods below.

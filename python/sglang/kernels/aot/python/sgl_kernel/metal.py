@@ -11,7 +11,9 @@ if TYPE_CHECKING:
 _METALLIB_NAME = "sgl_metal_kernels.metallib"
 
 try:
-    from . import _metal
+    # ``mlx.extension.MetalExtension`` derives the native module and sidecar
+    # names from the final component of the extension name.
+    from . import sgl_metal_kernels as _metal
 
     _metallib_path = Path(_metal.__file__).resolve().parent / _METALLIB_NAME
     if not _metallib_path.is_file():
@@ -26,9 +28,10 @@ except ImportError as _exc:  # pragma: no cover - import guarded at call time
 else:
     _IMPORT_ERROR = None
 
-# Python wrappers for the compiled `_metal.*` entry points go below. Wrappers
-# validate input shapes/dtypes and then invoke AOT C++ entry points. They do
-# not force `mx.eval`, so MLX can keep these calls inside its lazy graph.
+# Python wrappers for the compiled ``sgl_metal_kernels.*`` entry points go
+# below. Wrappers validate input shapes/dtypes and then invoke AOT C++ entry
+# points. They do not force ``mx.eval``, so MLX can keep these calls inside its
+# lazy graph.
 
 
 def rope_pool_fused(
